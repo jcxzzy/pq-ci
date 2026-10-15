@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <ucontext.h>
+#include <unistd.h>
 
 typedef struct { char name[16]; uint8_t *base; size_t size; } mod_ref_t;
 extern mod_ref_t g_mod_ref[8];
