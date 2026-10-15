@@ -1,0 +1,33 @@
+name: arm64-host
+on:
+  workflow_dispatch:
+
+jobs:
+  run-host:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载客体产物（私有 Release 资产）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download guest -p guest.tar.gz -O /tmp/guest.tar.gz
+          tar -xzf /tmp/guest.tar.gz
+
+      - name: 编译 arm64 宿主
+        run: make -C host
+
+      - name: 运行 dmhost（120 秒看门狗）
+        run: |
+          ulimit -c 0
+          ./host/dmhost out 2>&1 | tee dmhost.log || true
+          echo "---- 末 30 行 ----"; tail -30 dmhost.log
+
+      - name: 上传启动日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmhost-log
+          path: dmhost.log
