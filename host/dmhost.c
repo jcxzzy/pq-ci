@@ -523,6 +523,7 @@ static uint64_t svc_impl(int num, uint64_t *x) {
     case 47: x[1] = x[2] = x[3] = 0; return 0;   // GetLastThreadInfo（x1..x3 三寄存器）
     case 48: x[1] = 0x100000000ull; return 0;              // GetResourceLimitLimitValue → x1
     case 49: x[1] = image_bytes() + g_heap_cur; return 0;  // GetResourceLimitCurrentValue → x1
+    case 50: return 0;   // SetThreadActivity(h, 挂起/恢复)：报成功不动作——工作线程本就睡在条件变量上
     case 51: {  // GetThreadContext3(out ThreadContext 0x328, h)：结构体写指针（包装无寄存器存回）
         memset((void *)(uintptr_t)x[0], 0, 0x328);
         return 0;
