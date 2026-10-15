@@ -856,7 +856,6 @@ static uint32_t n_pb_getflags(const void *b) { return *(const uint32_t *)((const
 static void *n_pb_getmemory(const void *b) { return *(void *const *)((const uint8_t *)b + 16); }
 static uint64_t n_pb_getsize(const void *b) { return *(const uint64_t *)((const uint8_t *)b + 24); }
 static uint32_t n_pool_init2(void *p, const void *b) {
-    memset(p, 0, 0x20);
     *(uint32_t *)p = NVN_MAGIC('P', 'O', 'O', 'L');
     *(uint32_t *)((uint8_t *)p + 8) = *(const uint32_t *)((const uint8_t *)b + 8);
     *(void **)((uint8_t *)p + 16) = *(void *const *)((const uint8_t *)b + 16);
@@ -917,7 +916,6 @@ static uint32_t n_cb_setpool(void *c, void *pool, int64_t off) { (void)c; (void)
 static uint32_t n_cb_fence(void *c, void *s, int f) { (void)c; (void)s; (void)f; return 0; }   // FenceSync/WaitSync
 // —— 贴图/采样器/缓冲描述符池（对象：magic@0 pool@8 off@16 count@24）
 static uint32_t n_tpool_init(void *tp, void *pool, int64_t off, int32_t count) {
-    memset(tp, 0, 0x20);
     *(uint32_t *)tp = NVN_MAGIC('T', 'P', 'O', 'L');
     *(void **)((uint8_t *)tp + 8) = pool;
     *(uint64_t *)((uint8_t *)tp + 16) = (uint64_t)off;
@@ -938,7 +936,9 @@ static uint32_t n_sync_init(void *s, void *dev, uint32_t flags) {
     if (n_logged++ < 3) LOG("nvn SyncInitialize %p flags=%#x ← %p（前 3 个）", s, flags, NVN_CALLER);
     return 1;
 }
-static uint32_t n_cb_init(void *c, void *dev) { memset(c, 0, 0x100); *(uint32_t *)c = NVN_MAGIC('C', 'M', 'D', 'B'); *(void **)((uint8_t *)c + 8) = dev; LOG("nvn CommandBufferInitialize %p dev=%p ← %p ← %p", c, dev, NVN_CALLER, __builtin_return_address(1)); return 1; }
+// 注意：不 memset 整对象——Unity 的命令缓冲对象（实证 0xe0 字节）同时携带其他字段
+// （+0xb0=同步池包装、+0xc0=内存池），清 0x100 会抹掉它们并溢出堆 32 字节
+static uint32_t n_cb_init(void *c, void *dev) { *(uint32_t *)c = NVN_MAGIC('C', 'M', 'D', 'B'); *(void **)((uint8_t *)c + 8) = dev; LOG("nvn CommandBufferInitialize %p dev=%p ← %p", c, dev, NVN_CALLER); return 1; }
 static void *h_nvn_bootstrap(const char *name) {
     if (!name || !*name) return NULL;
     static const struct { const char *nm; void *fn; } known[] = {
