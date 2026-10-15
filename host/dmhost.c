@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1119,6 +1120,14 @@ static uint32_t h_hid_touchcount(int32_t *count, void *states, int32_t max) {
     if (count) *count = 0;   // 无触摸点
     return 0;
 }
+// 客体 stdio 直通宿主 stderr（d2r libc 直通表思路）——Unity 引擎日志因此现形，
+// 此前 musl printf 的输出被 nn-musl 的 write 垫片静默丢弃。
+static uint64_t h_g_printf(const char *fmt, ...) { va_list ap; va_start(ap, fmt); int r = vfprintf(stderr, fmt, ap); va_end(ap); return r; }
+static uint64_t h_g_fprintf(void *f, const char *fmt, ...) { (void)f; va_list ap; va_start(ap, fmt); int r = vfprintf(stderr, fmt, ap); va_end(ap); return r; }
+static uint64_t h_g_vfprintf(void *f, const char *fmt, va_list ap) { (void)f; return (uint64_t)vfprintf(stderr, fmt, ap); }
+static uint64_t h_g_fwrite(const void *p, uint64_t sz, uint64_t n, void *f) { (void)f; return (uint64_t)fwrite(p, (size_t)sz, (size_t)n, stderr); }
+static uint64_t h_g_puts(const char *s) { fputs(s ? s : "(null)", stderr); fputc('\n', stderr); return 0; }
+static uint64_t h_g_fflush(void *f) { (void)f; fflush(stderr); return 0; }
 typedef struct { const char *name; hle_fn0 fn; } hle_ent;
 static hle_fn0 force_lookup(const char *name) {
     // nnMain 开局序（main+0xbfdcdc 反汇编实证）：time::Initialize(+0x74) 连 sm IPC、
@@ -1146,6 +1155,13 @@ static hle_fn0 force_lookup(const char *name) {
         {"exit", (hle_fn0)h_guest_exit},          // 诊断：客体主动 exit 的调用者
         {"_exit", (hle_fn0)h_guest_exit},
         {"quick_exit", (hle_fn0)h_guest_exit},
+        // 客体 stdio → 宿主 stderr（引擎日志现形）
+        {"printf", (hle_fn0)h_g_printf},
+        {"fprintf", (hle_fn0)h_g_fprintf},
+        {"vfprintf", (hle_fn0)h_g_vfprintf},
+        {"fwrite", (hle_fn0)h_g_fwrite},
+        {"puts", (hle_fn0)h_g_puts},
+        {"fflush", (hle_fn0)h_g_fflush},
         // hid 查询（Unity 已调用）：写出参为零态，避免读到残留栈值
         {"_ZN2nn3hid15GetNpadStyleSetERKj", h_oe_normal},                     // 无手柄样式
         {"_ZN2nn3hid16GetDebugPadStateEPNS0_13DebugPadStateE", (hle_fn0)h_hid_zero8},
