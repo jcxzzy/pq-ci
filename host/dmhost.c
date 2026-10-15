@@ -115,6 +115,7 @@ static uint64_t now_ns(void) { return (uint64_t)clock_gettime_nsec_np(CLOCK_MONO
 static uint8_t *g_as;                 // 客体地址空间基址（= ASLR 区基址）
 static uint8_t *g_alias, *g_stack, *g_heap;
 static size_t g_heap_cur;             // SetHeapSize 已提交大小
+uint64_t g_guest_lo, g_guest_hi;      // 预留块区间（fault.c 转储客体对象用）
 static void mem_init(void) {
     if (g_as) return;
     g_as = mmap(NULL, RESERVE, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -122,6 +123,8 @@ static void mem_init(void) {
     g_alias = g_as + 0x10000000;
     g_stack = g_as + 0x50000000;
     g_heap  = g_as + 0x60000000;
+    g_guest_lo = (uint64_t)g_as;
+    g_guest_hi = (uint64_t)g_as + RESERVE;
     LOG("客体地址空间 %p +%#llx（alias %p / stack %p / heap %p）", g_as, (unsigned long long)RESERVE, g_alias, g_stack, g_heap);
 }
 
