@@ -263,6 +263,8 @@ static uint64_t svc_impl(int num, uint64_t *x) {
         LOG("svc#38 Break reason=%#llx addr=%#llx size=%#llx", (unsigned long long)reason,
             (unsigned long long)x[1], (unsigned long long)x[2]);
         if (reason & 1) return 0;   // BreakReason_Debug：仅停一下，继续
+        void guest_backtrace(uint64_t);
+        guest_backtrace(x[29]);     // 从门保存的客体 fp 走帧链（包装函数无栈帧）
         _exit(81);
     }
     case 39: {  // OutputDebugString(ptr, len)：打出客体自己的诊断文本
