@@ -704,6 +704,7 @@ static uint32_t h_getentrytype(int32_t *out, const char *path) {
     struct stat st;
     if (stat(hp, &st)) { LOG("GetEntryType(%s) stat 失败 errno=%d", path, errno); return FS_ENOENT; }
     *out = S_ISDIR(st.st_mode) ? 1 : 2;   // DirectoryEntryType: 1=目录 2=文件
+    LOG("GetEntryType(%s) → type=%d", path, *out);
     return 0;
 }
 static uint32_t h_opendirectory(uint64_t *out, const char *path, int mode) {
