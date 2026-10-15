@@ -134,13 +134,92 @@ static int map_find(uint64_t a, uint64_t n) {
     return 0;
 }
 
-// svc 处理器：号码按 build/svc_map.txt（老固件世代编号）。
+// ---------- 客体线程与同步（d2r hle_thread.c 的最小版） ----------
+// Apple Silicon 上宿主客体同构：客体线程 = 装好四线程槽（K18/KTLS/KTLR/KGATE）
+// 后由 dm_thread_enter 切到客体栈的 pthread。互斥/条件变量用「全局锁 + 单条件
+// 变量广播」实现——惊群可忍，条件由客体重查，语义与 futex 一致。
+#define R_TIMEOUT 0xEA01u
+#define R_BAD_HANDLE 0xE401u
+typedef struct thr {
+    pthread_t pt;
+    uint64_t entry, arg, stack_top;
+    int prio, core, started, exited, closed;
+    uint32_t handle;
+    struct thr *all;
+} thr_t;
+typedef struct { int signaled; } ev_t;
+enum { H_NONE = 0, H_THREAD, H_EVENT, H_FAKE };
+#define MAX_H 512
+static struct { int type; void *obj; } g_htab[MAX_H];
+static pthread_mutex_t G = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t GV = PTHREAD_COND_INITIALIZER;
+static thr_t *g_thr_all;
+static __thread thr_t *t_cur;
+extern void dm_thread_enter(uint64_t, uint64_t, uint64_t);
+void dm_thread_returned(void) { die("客体线程入口返回（须经 ExitThread 退出）"); }
+void guest_thread_init(void);
+
+static uint32_t h_alloc(int type, void *obj) {
+    for (uint32_t i = 1; i < MAX_H; i++)
+        if (!g_htab[i].type) { g_htab[i].type = type; g_htab[i].obj = obj; return i + 0x100; }
+    die("句柄表满");
+}
+static void *h_get(uint32_t h, int type) {
+    uint32_t i = h - 0x100;
+    return (i && i < MAX_H && g_htab[i].type == type) ? g_htab[i].obj : NULL;
+}
+static int h_signaled(uint32_t h) {
+    if (h == 0xffff8000u) return 0;                       // 当前线程句柄
+    void *o;
+    if ((o = h_get(h, H_THREAD))) return ((thr_t *)o)->exited;
+    if ((o = h_get(h, H_EVENT))) return ((ev_t *)o)->signaled;
+    return g_htab[h - 0x100].type != H_NONE;              // 假句柄（服务会话）：视为已触发
+}
+static struct timespec deadline_from(int64_t tmo_ns) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    if (tmo_ns >= 0) {
+        ts.tv_sec += (time_t)(tmo_ns / 1000000000);
+        ts.tv_nsec += (long)(tmo_ns % 1000000000);
+        if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+    } else ts.tv_sec += 3600;   // 无限：睡长觉，看门狗兜底
+    return ts;
+}
+static void *thread_main(void *p) {
+    thr_t *t = p;
+    t_cur = t;
+    guest_thread_init();
+    pthread_mutex_lock(&G);
+    while (!t->started) pthread_cond_wait(&GV, &G);
+    pthread_mutex_unlock(&G);
+    dm_thread_enter(t->entry, t->arg, t->stack_top);
+    die("不可达");
+}
+static void thread_exit_current(void) {
+    thr_t *t = t_cur;
+    if (!t) _exit(0);   // 主线程 ExitThread ≈ 进程退出
+    pthread_mutex_lock(&G);
+    t->exited = 1;
+    pthread_cond_broadcast(&GV);
+    pthread_mutex_unlock(&G);
+    pthread_exit(NULL);
+}
+static uint32_t main_thread_register(void) {
+    static thr_t mt;
+    mt.pt = pthread_self(); mt.started = 1; mt.prio = 44; mt.core = 0;
+    pthread_mutex_lock(&G);
+    mt.handle = h_alloc(H_THREAD, &mt);
+    mt.all = g_thr_all; g_thr_all = &mt;
+    pthread_mutex_unlock(&G);
+    t_cur = &mt;
+    return mt.handle;
+}
 // 出参契约按各包装函数 svc 后指令实证（全量扫描 106 个门）：小标量一律从寄存器回——
 // 包装函数自己 str x1/w1（GetInfo 值=x1、SetHeapSize 基址=x1、句柄=w1、PageInfo=w1、
 // GetThreadCoreMask=core w1 + mask x2、资源限值=x1）；只有大结构体（MemoryInfo、
 // ThreadContext）由本层直接写指针。此前把值写进 out 指针会被包装函数用残留寄存器
 // 覆盖——addr=2 正是 GetInfo 残留 x1=InfoType 常量被当地址用。
-static uint32_t g_handle_next = 0x100;   // 假句柄分配
+static uint8_t g_svc_seen[256];   // 首次命中记录（文件域，防重复打印异常）
 
 static uint64_t image_bytes(void) {
     uint64_t n = 0;
@@ -222,11 +301,28 @@ static uint64_t svc_impl(int num, uint64_t *x) {
     case 7:  // ExitProcess
         LOG("svc#7 ExitProcess");
         _exit(0);
-    case 8: x[1] = ++g_handle_next; return 0;   // CreateThread(out h, …)：单线程模拟，不真跑
-    case 9:  // StartThread(h)
+    case 8: {  // CreateThread(→w1 h; x1 入口, x2 参数, x3 栈顶, w4 优先级, w5 核)：真 pthread
+        thr_t *t = calloc(1, sizeof *t);
+        t->entry = x[1]; t->arg = x[2]; t->stack_top = x[3];
+        t->prio = (int)(int32_t)x[4]; t->core = (int)(int32_t)x[5];
+        pthread_attr_t a; pthread_attr_init(&a);
+        pthread_attr_setstacksize(&a, 1 << 20);   // 宿主栈只垫门框；真正的栈由 dm_thread_enter 切成客体栈
+        if (pthread_create(&t->pt, &a, thread_main, t)) die("pthread_create");
+        pthread_mutex_lock(&G);
+        t->handle = h_alloc(H_THREAD, t);
+        t->all = g_thr_all; g_thr_all = t;
+        pthread_mutex_unlock(&G);
+        x[1] = t->handle;
         return 0;
-    case 10: // ExitThread
-        LOG("svc#10 ExitThread on main?");
+    }
+    case 9: {  // StartThread(h)
+        thr_t *t = h_get((uint32_t)x[0], H_THREAD);
+        if (!t) return R_BAD_HANDLE;
+        pthread_mutex_lock(&G); t->started = 1; pthread_cond_broadcast(&GV); pthread_mutex_unlock(&G);
+        return 0;
+    }
+    case 10:  // ExitThread(退出码)：当前客体线程收尾退出
+        thread_exit_current();
         return 0;
     case 11: {  // SleepThread(ns)：真睡，避免轮询空转烧看门狗
         uint64_t ns = x[0];
@@ -234,17 +330,104 @@ static uint64_t svc_impl(int num, uint64_t *x) {
         nanosleep(&ts, NULL);
         return 0;
     }
-    case 12: x[1] = 44; return 0;            // GetThreadPriority(out i32, h) → w1
-    case 13: return 0;                        // SetThreadPriority
-    case 14: x[1] = 0; x[2] = 7; return 0;   // GetThreadCoreMask(out i32, out u64, h) → w1=core x2=mask
+    case 12: {  // GetThreadPriority(→w1, h)
+        thr_t *t = h_get((uint32_t)x[1], H_THREAD);
+        x[1] = t ? (uint32_t)t->prio : 44;
+        return 0;
+    }
+    case 13: {  // SetThreadPriority(h, prio)
+        thr_t *t = h_get((uint32_t)x[0], H_THREAD);
+        if (t) t->prio = (int)(int32_t)x[1];
+        return 0;
+    }
+    case 14: {  // GetThreadCoreMask(→w1 core, →x2 mask, h)
+        thr_t *t = h_get((uint32_t)x[2], H_THREAD);
+        x[1] = t ? (uint32_t)t->core : 0;
+        x[2] = 7;
+        return 0;
+    }
     case 15: return 0;                        // SetThreadCoreMask
     case 16: return 0;                        // GetCurrentProcessorNumber
-    case 17: case 18: case 23: return 0;     // SignalEvent / ClearEvent / ResetSignal
-    case 21: x[1] = ++g_handle_next; return 0;   // CreateTransferMemory(out h) → w1
-    case 22: return 0;                        // CloseHandle
-    case 24: x[1] = 0; return 0;             // WaitSynchronization(out idx, …) → w1：恒满足
-    case 25: return 0;                        // CancelSynchronization
-    case 26: case 27: case 28: case 29: return 0;   // ArbitrateLock/Unlock、Wait/SignalProcessWideKey
+    case 17: {  // SignalEvent(h)
+        ev_t *e = h_get((uint32_t)x[0], H_EVENT);
+        if (!e) return R_BAD_HANDLE;
+        pthread_mutex_lock(&G); e->signaled = 1; pthread_cond_broadcast(&GV); pthread_mutex_unlock(&G);
+        return 0;
+    }
+    case 18: {  // ClearEvent(h)
+        ev_t *e = h_get((uint32_t)x[0], H_EVENT);
+        if (!e) return R_BAD_HANDLE;
+        pthread_mutex_lock(&G); e->signaled = 0; pthread_mutex_unlock(&G);
+        return 0;
+    }
+    case 21: {  // CreateTransferMemory(→w1 h)：假句柄（传输内存仅 NVN 数据流用）
+        pthread_mutex_lock(&G); x[1] = h_alloc(H_FAKE, NULL); pthread_mutex_unlock(&G);
+        return 0;
+    }
+    case 22: {  // CloseHandle(h)
+        uint32_t i = (uint32_t)x[0] - 0x100;
+        pthread_mutex_lock(&G);
+        if (i && i < MAX_H) { g_htab[i].type = H_NONE; g_htab[i].obj = NULL; }
+        pthread_mutex_unlock(&G);
+        return 0;
+    }
+    case 23: {  // ResetSignal(h)
+        ev_t *e = h_get((uint32_t)x[0], H_EVENT);
+        if (e) { pthread_mutex_lock(&G); e->signaled = 0; pthread_mutex_unlock(&G); }
+        return 0;
+    }
+    case 24: {  // WaitSynchronization(→w1 下标; x1 句柄数组, w2 个数, x3 超时)
+        uint32_t *hs = (uint32_t *)(uintptr_t)x[1];
+        uint32_t n = (uint32_t)x[2];
+        int64_t tmo = (int64_t)x[3];
+        struct timespec dl = deadline_from(tmo);
+        pthread_mutex_lock(&G);
+        int64_t idx = -1;
+        for (;;) {
+            for (uint32_t i = 0; i < n; i++) { uint32_t h = hs[i]; if (h && h_signaled(h)) { idx = i; break; } }
+            if (idx >= 0) break;
+            int rc = pthread_cond_timedwait(&GV, &G, &dl);
+            if (rc == ETIMEDOUT && tmo >= 0) break;
+        }
+        pthread_mutex_unlock(&G);
+        x[1] = (uint32_t)idx;   // -1 = 超时
+        return idx >= 0 ? 0 : R_TIMEOUT;
+    }
+    case 25: return 0;                        // CancelSynchronization：全局广播下天然可重试
+    case 26: {  // ArbitrateLock(owner_h, x1 锁地址, w2 标签)：等锁归零后原子占为己有
+        volatile uint32_t *m = (volatile uint32_t *)(uintptr_t)x[1];
+        uint32_t tag = (uint32_t)x[2];
+        pthread_mutex_lock(&G);
+        for (;;) {
+            uint32_t v = *m;
+            if (v == 0 && __sync_bool_compare_and_swap(m, 0, tag)) break;
+            pthread_cond_wait(&GV, &G);   // 假醒无害：醒来重查锁字
+        }
+        pthread_mutex_unlock(&G);
+        return 0;
+    }
+    case 27: {  // ArbitrateUnlock(x0 锁地址)：清锁 + 广播
+        pthread_mutex_lock(&G);
+        *(volatile uint32_t *)(uintptr_t)x[0] = 0;
+        pthread_cond_broadcast(&GV);
+        pthread_mutex_unlock(&G);
+        return 0;
+    }
+    case 28: {  // WaitProcessWideKeyAtomic(x0 互斥地址, x1 键, w2 标签, x3 超时)：原子放锁再睡
+        struct timespec dl = deadline_from((int64_t)x[3]);
+        pthread_mutex_lock(&G);
+        volatile uint32_t *m = (volatile uint32_t *)(uintptr_t)x[0];
+        if (*m) { *m = 0; pthread_cond_broadcast(&GV); }
+        pthread_cond_timedwait(&GV, &G, &dl);   // 假醒无害：客体条件变量循环自己重查谓词
+        pthread_mutex_unlock(&G);
+        return 0;
+    }
+    case 29: {  // SignalProcessWideKey(x0 键, w1 唤醒数)：广播（超集，谓词重查保证正确性）
+        pthread_mutex_lock(&G);
+        pthread_cond_broadcast(&GV);
+        pthread_mutex_unlock(&G);
+        return 0;
+    }
     case 30: return now_ns() * 12 / 625;     // GetSystemTick（19.2 MHz）
     case 31: {  // ConnectToNamedPort(out h, name) → w1
         char nm[64] = {0};
@@ -254,12 +437,16 @@ static uint64_t svc_impl(int num, uint64_t *x) {
             nm[i] = (char)c;
         }
         LOG("svc#31 ConnectToNamedPort → %s", nm);
-        x[1] = ++g_handle_next;
+        pthread_mutex_lock(&G); x[1] = h_alloc(H_FAKE, NULL); pthread_mutex_unlock(&G);
         return 0;
     }
     case 33: LOG("svc#33 SendSyncRequest h=%#llx（IPC 未接管）", (unsigned long long)x[0]); return 0xF601;
     case 36: x[1] = 0x50; return 0;                   // GetProcessId(out u64, h) → x1
-    case 37: x[1] = 0x60 + g_handle_next; return 0;   // GetThreadId(out u64, h) → x1
+    case 37: {  // GetThreadId(out u64, h) → x1
+        uint32_t i = (uint32_t)x[1] - 0x100;
+        x[1] = 0x6000 + (i < MAX_H ? i : 0);
+        return 0;
+    }
     case 38: {  // Break(reason, addr, size)：Debug 断点继续，致命断点退出
         uint64_t reason = x[0];
         LOG("svc#38 Break reason=%#llx addr=%#llx size=%#llx", (unsigned long long)reason,
@@ -331,9 +518,24 @@ static uint64_t svc_impl(int num, uint64_t *x) {
         return 0;
     }
     case 60: return 0;   // DumpInfo
-    case 64: x[1] = ++g_handle_next; x[2] = ++g_handle_next; return 0;   // CreateSession → w1 w2
-    case 69: x[1] = ++g_handle_next; x[2] = ++g_handle_next; return 0;   // CreateEvent → w1 w2
-    case 83: x[1] = ++g_handle_next; return 0;   // CreateInterruptEvent → w1
+    case 64: {  // CreateSession(→w1 服务端, →w2 客户端)
+        pthread_mutex_lock(&G);
+        x[1] = h_alloc(H_FAKE, NULL); x[2] = h_alloc(H_FAKE, NULL);
+        pthread_mutex_unlock(&G);
+        return 0;
+    }
+    case 69: {  // CreateEvent(→w1, →w2)：读写事件同体
+        ev_t *e = calloc(1, sizeof *e);
+        pthread_mutex_lock(&G);
+        uint32_t h = h_alloc(H_EVENT, e);
+        pthread_mutex_unlock(&G);
+        x[1] = h; x[2] = h;
+        return 0;
+    }
+    case 83: {  // CreateInterruptEvent(→w1)
+        pthread_mutex_lock(&G); x[1] = h_alloc(H_FAKE, NULL); pthread_mutex_unlock(&G);
+        return 0;
+    }
     default:
         return 0xF001;
     }
@@ -351,8 +553,8 @@ uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
                 return t;
             }
             g_last_svc = g->arg;
-            static uint8_t hit[256];
-            if (g->arg < 256 && !hit[g->arg]++) LOG("svc#%d 首次命中（x0=%#llx）", g->arg, (unsigned long long)regs[0]);
+            if (g->arg >= 0 && g->arg < 256 && !g_svc_seen[g->arg]++)
+                LOG("svc#%d 首次命中（x0=%#llx）", g->arg, (unsigned long long)regs[0]);
             uint64_t r = svc_impl(g->arg, regs);
             if (r == 0xF001) LOG("svc#%d 未实现 → 0xF001", g->arg);
             regs[0] = r;   // 门契约：结果写进保存区，entry.S 恢复时带回客体 x0
@@ -736,7 +938,7 @@ static void guest_main(void) {
     guest_thread_init();
     ((fn0)req("_init_libc0"))();
     LOG(">>> nnosInitialize");
-    ((fn2)req("nnosInitialize"))(1, 0);
+    ((fn2)req("nnosInitialize"))(main_thread_register(), 0);
     ((fn0)req("_init_libc1"))();
     LOG(">>> nninitInitializeSdkModule"); ((fn0)req("nninitInitializeSdkModule"))();
     LOG(">>> nninitStartup"); ((fn0)req("nninitStartup"))();
