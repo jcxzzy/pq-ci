@@ -59,8 +59,21 @@ static void watchdog(int sig) {
 static void on_host_exit(void) {
     fprintf(stderr, "[dm] 进程正常退出（exit/main 返回；最近svc#%d）\n", g_last_svc);
 }
-static void on_abort(int sig) {
-    fprintf(stderr, "[dm] HOST SIGABRT/SIGTRAP sig=%d（最近svc#%d）\n", sig, g_last_svc);
+static void on_abort(int sig, siginfo_t *si, void *uc_) {
+    // SIGTRAP = 客体 brk 指令（clang 的 trap/unreachable/断言）；带上现场再退
+    if (sig == SIGTRAP && uc_) {
+        ucontext_t *uc = uc_;
+        uint64_t pc = uc->uc_mcontext->__ss.__pc, lr = uc->uc_mcontext->__ss.__lr;
+        uint64_t sp = uc->uc_mcontext->__ss.__sp, fp = uc->uc_mcontext->__ss.__fp;
+        char w[64];
+        where_of(pc, w, sizeof w);
+        fprintf(stderr, "[dm] HOST SIGTRAP pc=%#llx(%s) lr=%#llx sp=%#llx fp=%#llx 最近svc#%d\n",
+                (unsigned long long)pc, w, (unsigned long long)lr, (unsigned long long)sp,
+                (unsigned long long)fp, g_last_svc);
+        guest_backtrace(fp);
+        _exit(89);
+    }
+    fprintf(stderr, "[dm] HOST SIGABRT（最近svc#%d）\n", g_last_svc);
     _exit(88);
 }
 
@@ -76,7 +89,8 @@ void diag_install(void) {
     sw.sa_handler = watchdog;
     sigaction(SIGALRM, &sw, NULL);
     struct sigaction ab = {0};
-    ab.sa_handler = on_abort;
+    ab.sa_sigaction = on_abort;
+    ab.sa_flags = SA_SIGINFO;
     sigaction(SIGABRT, &ab, NULL);
     sigaction(SIGTRAP, &ab, NULL);
     atexit(on_host_exit);
