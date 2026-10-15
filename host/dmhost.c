@@ -102,14 +102,24 @@ static void gate_register(uint64_t ret, const char *kind, int arg) {
 
 static uint64_t now_ns(void) { return (uint64_t)clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW); }
 
+// ---------- 客体地址空间（照 d2r-mobile hle_svc.c 的架构：预留一整块，按 Horizon 分区） ----------
+#define RESERVE (5ull << 30)          // 5 GB：alias/stack + 4 GB 堆区，只占地址不占内存
+static uint8_t *g_as;                 // 客体地址空间基址
+static uint8_t *g_alias, *g_stack, *g_heap;
+static void mem_init(void) {
+    if (g_as) return;
+    g_as = mmap(NULL, RESERVE, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (g_as == MAP_FAILED) die("预留客体地址空间失败");
+    g_alias = g_as + 0x10000000;      // alias 512 MB
+    g_stack = g_as + 0x30000000;      // 栈区 256 MB
+    g_heap  = g_as + 0x40000000;      // 堆区（到块尾 ≈ 4 GB）
+    LOG("客体地址空间 %p +%#llx（alias %p / stack %p / heap %p）", g_as, (unsigned long long)RESERVE, g_alias, g_stack, g_heap);
+}
+
 // 客体堆（SetHeapSize / QueryMemory 共用）
 static void *guest_heap(void) {
-    static void *h;
-    if (!h) {
-        h = mmap(NULL, 0x10000000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-        if (h == MAP_FAILED) die("客体堆 mmap");
-    }
-    return h;
+    mem_init();
+    return g_heap;
 }
 
 // svc 处理器：号码表按本 SDK 二进制符号名实证（build/svc_map.txt，老固件世代编号，
@@ -119,18 +129,37 @@ static uint32_t g_handle_next = 0x10;   // 假句柄分配（线程/事件）
 
 static uint64_t svc_impl(int num, uint64_t *x) {
     switch (num) {
-    case 1:  // SetHeapSize(size) → x1 = 堆地址
-        x[1] = (uint64_t)guest_heap();
+    case 1: {  // SetHeapSize(size) → x1 = 堆地址（在预留块堆区内提交 RW）
+        mem_init();
+        uint64_t size = x[1];
+        if (size > RESERVE - 0x40000000) return 0xCE011;   // 超出堆区：让 SDK 按原版步进减 2 MB 重试
+        if (mprotect(g_heap, (size_t)size, PROT_READ | PROT_WRITE)) die("SetHeapSize mprotect");
+        x[1] = (uint64_t)g_heap;
         return 0;
-    case 6: {  // QueryMemory(out MemoryInfo 0x28, out PageInfo, addr)：堆=InUse，其余=Free
-        uint64_t addr = x[2];
-        void *h = guest_heap();
-        struct { uint64_t base, size; uint32_t state, attr, ipc, perm, pad; } mi = {0};
-        if ((uint64_t)h <= addr && addr < (uint64_t)h + 0x10000000) {
-            mi.base = (uint64_t)h; mi.size = 0x10000000; mi.state = 3; mi.perm = 0x77;
+    }
+    case 6: {  // QueryMemory(out MemoryInfo 0x28, out PageInfo, addr)：按客体地址空间分区回报
+        mem_init();
+        uint64_t addr = x[2], base = 0, esz = 0;
+        uint32_t state = 0, perm = 0;
+        if ((uint64_t)g_as <= addr && addr < (uint64_t)g_as + RESERVE) {
+            if (addr < (uint64_t)g_alias) { base = (uint64_t)g_as; esz = 0x10000000; }
+            else if (addr < (uint64_t)g_alias + 0x20000000) { base = (uint64_t)g_alias; esz = 0x20000000; state = 0x3; perm = 3; }
+            else if (addr < (uint64_t)g_stack) { base = (uint64_t)g_alias + 0x20000000; esz = 0x10000000; }
+            else if (addr < (uint64_t)g_heap) { base = (uint64_t)g_stack; esz = 0x10000000; state = 0xB; perm = 3; }
+            else { base = (uint64_t)g_heap; esz = RESERVE - 0x40000000; state = 0x3; perm = 3; }
         } else {
-            mi.base = addr & ~0x3FFFul; mi.size = 0x4000; mi.state = 0;
+            for (int i = 0; i < g_nmod; i++) {   // 模块映像 = 代码区
+                uint64_t b = (uint64_t)g_mod[i].base;
+                if (addr >= b && addr < b + g_mod[i].size) { base = b; esz = g_mod[i].size; state = 3; perm = 5; break; }
+            }
+            if (!esz) {   // 宿主当前线程栈 → 状态 0xB（SDK 主线程记录用，见 d2r 注释）
+                uint64_t top = (uint64_t)pthread_get_stackaddr_np(pthread_self());
+                uint64_t ssz = pthread_get_stacksize_np(pthread_self());
+                if (addr < top && addr >= top - ssz) { base = top - ssz; esz = ssz; state = 0xB; perm = 3; }
+                else { base = addr & ~0x3FFFull; esz = 0x4000; }
+            }
         }
+        struct { uint64_t base, size; uint32_t state, attr, ipc, perm, pad; } mi = {base, esz, state, 0, 0, perm, 0};
         memcpy((void *)(uintptr_t)x[0], &mi, sizeof mi);
         if (x[1]) *(uint32_t *)(uintptr_t)x[1] = 0;
         return 0;
@@ -213,17 +242,22 @@ static uint64_t svc_impl(int num, uint64_t *x) {
         *(uint64_t *)(uintptr_t)x[0] = 0x60 + g_handle_next;
         return 0;
     }
-    case 41: {  // GetInfo(out u64, InfoType, handle, key)
-        uint64_t t = x[1];
-        uint64_t v = 0;
+    case 41: {  // GetInfo(out u64, InfoType, handle, key)：老固件编号，语义按调用方符号实证
+        mem_init();
+        uint64_t t = x[1], key = x[3], v = 0;
         switch (t) {
-        case 12: v = 0x8000000000ull; break;            // 地址空间上界（AslrSpaceManager 用）
-        case 0:  v = 0x10000000ull; break;              // TotalMemorySize
-        case 1:  v = 0x1000000ull; break;               // UsedMemorySize
-        case 6:  v = 0x10000000ull; break;              // 内存相关（观察值）
-        case 16: v = 0x7fffffffffull; break;            // 最大用户地址
-        default: LOG("svc#41 GetInfo 未知 type=%llu key=%#llx", (unsigned long long)t,
-                     (unsigned long long)x[3]); return 0xF001;
+        case 12: v = (uint64_t)g_as; break;                    // 地址空间起点（Aslr/OsResourceManager）
+        case 13: v = (uint64_t)g_as + RESERVE; break;          // 地址空间终点
+        case 14: v = 0; break;                                  // 栈守卫起点
+        case 15: v = 0x8000000ull; break;                       // 栈守卫终点
+        case 11: v = 0; break;                                  // VAMM 保留区（key 2/3）：0 = 未启用
+        case 16: v = 0; break;                                  // 虚拟地址内存未启用（避开 MapPhysicalMemory 链）
+        case 17: v = 0; break;                                  // VAMM 资源用量
+        case 8:  v = 0; break;                                  // 无调试器
+        case 10: v = 0; break;                                  // 空闲拍数
+        case 7:  v = 0xE0000000ull; break;                      // 总内存（QueryMemoryInfo 总量格）
+        case 6:  v = 0x1000000ull; break;                       // 已用内存
+        default: LOG("svc#41 GetInfo type=%llu key=%#llx → 0", (unsigned long long)t, (unsigned long long)key); v = 0; break;
         }
         *(uint64_t *)(uintptr_t)x[0] = v;
         return 0;
