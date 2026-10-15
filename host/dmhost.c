@@ -606,6 +606,8 @@ static uint32_t h_mountrom(const char *name, void *buf, uint64_t sz) {
 static uint32_t h_abortimpl(const char *file, const char *func, const char *expr, int line, const uint32_t *result, ...) {
     LOG("客体中止 AbortImpl：file=%s func=%s expr=%s line=%d Result=%#x",
         file ? file : "?", func ? func : "?", expr ? expr : "?", line, result ? *result : 0);
+    void guest_backtrace(uint64_t);
+    guest_backtrace((uint64_t)__builtin_frame_address(0));
     _exit(83);
 }
 static uint32_t h_assertfail(int type, const char *file, const char *func, const char *expr, int line) {
