@@ -56,9 +56,8 @@ static void watchdog(int sig) {
     _exit(71);
 }
 
-static void on_host_exit(int code, void *unused) {
-    (void)unused;
-    fprintf(stderr, "[dm] 进程退出 code=%d（最近svc#%d）\n", code, g_last_svc);
+static void on_host_exit(void) {
+    fprintf(stderr, "[dm] 进程正常退出（exit/main 返回；最近svc#%d）\n", g_last_svc);
 }
 static void on_abort(int sig) {
     fprintf(stderr, "[dm] HOST SIGABRT/SIGTRAP sig=%d（最近svc#%d）\n", sig, g_last_svc);
@@ -80,5 +79,5 @@ void diag_install(void) {
     ab.sa_handler = on_abort;
     sigaction(SIGABRT, &ab, NULL);
     sigaction(SIGTRAP, &ab, NULL);
-    on_exit(on_host_exit, NULL);
+    atexit(on_host_exit);
 }
