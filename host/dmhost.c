@@ -929,6 +929,37 @@ static uint64_t n_tpool_getoff(void *tp) { return *(uint64_t *)((uint8_t *)tp + 
 static uint32_t n_tpool_getsize(void *tp) { return *(int32_t *)((uint8_t *)tp + 24); }
 static uint32_t n_tpool_register(void *tp, void *a, void *b) { (void)tp; (void)a; (void)b; return 0; }
 static uint32_t n_tpool_label(void *tp, const char *s) { (void)tp; (void)s; return 0; }
+// —— 缓冲（builder：dev@0 size@0x10 pool@0x18 off@0x20；对象：magic@0 pool@8 off@0x10 size@0x18）
+// Map = 内存池的 mem + 偏移（GPU 地址 = CPU 地址模型）。对象只写字段不清块（cmdbuf 教训）
+static uint32_t n_bb_setdefaults(void *b) { memset(b, 0, 0x28); return 0; }
+static uint32_t n_bb_setdevice(void *b, void *d) { *(void **)b = d; return 0; }
+static uint32_t n_bb_setstorage(void *b, void *pool, int64_t off, uint64_t size) {
+    *(uint64_t *)((uint8_t *)b + 0x10) = size;
+    *(void **)((uint8_t *)b + 0x18) = pool;
+    *(uint64_t *)((uint8_t *)b + 0x20) = (uint64_t)off;
+    return 0;
+}
+static uint64_t n_bb_getsize(const void *b) { return *(const uint64_t *)((const uint8_t *)b + 0x10); }
+static void *n_bb_getpool(const void *b) { return *(void *const *)((const uint8_t *)b + 0x18); }
+static uint64_t n_bb_getoff(const void *b) { return *(const uint64_t *)((const uint8_t *)b + 0x20); }
+static uint32_t n_buf_init(void *buf, const void *b) {
+    *(uint32_t *)buf = NVN_MAGIC('B', 'U', 'F', '0');
+    *(void **)((uint8_t *)buf + 8) = n_bb_getpool(b);
+    *(uint64_t *)((uint8_t *)buf + 0x10) = n_bb_getoff(b);
+    *(uint64_t *)((uint8_t *)buf + 0x18) = n_bb_getsize(b);
+    LOG("nvn BufferInitialize %p pool=%p off=%#llx size=%#llx ← %p", buf, n_bb_getpool(b),
+        (unsigned long long)n_bb_getoff(b), (unsigned long long)n_bb_getsize(b), NVN_CALLER);
+    return 1;
+}
+static void *n_buf_map(void *buf) {
+    void *pool = *(void **)((uint8_t *)buf + 8);
+    void *base = pool ? *(void **)((uint8_t *)pool + 16) : NULL;   // MemoryPool 的 mem 字段
+    return base ? (uint8_t *)base + *(uint64_t *)((uint8_t *)buf + 0x10) : NULL;
+}
+static void *n_buf_getpool(void *buf) { return *(void **)((uint8_t *)buf + 8); }
+static uint64_t n_buf_getoff(void *buf) { return *(uint64_t *)((uint8_t *)buf + 0x10); }
+static uint32_t n_buf_fin(void *buf) { *(uint32_t *)buf = 0; return 0; }
+static uint32_t n_buf_range3(void *a, uint64_t b, uint64_t c) { (void)a; (void)b; (void)c; return 0; }   // Flush/InvalidateMappedRange
 // —— 同步 / 命令缓冲初始化（对象语义见上方注释）
 static uint32_t n_sync_init(void *s, void *dev, uint32_t flags) {
     memset(s, 0, 0x20); *(uint32_t *)s = NVN_MAGIC('S', 'Y', 'N', 'C'); (void)dev; (void)flags;
@@ -1044,6 +1075,20 @@ static void *h_nvn_bootstrap(const char *name) {
         // 队列-同步
         {"nvnQueueFenceSync", (void *)n_cb_fence},
         {"nvnQueueWaitSync", (void *)n_cb_fence},
+        // 缓冲
+        {"nvnBufferBuilderSetDefaults", (void *)n_bb_setdefaults},
+        {"nvnBufferBuilderSetDevice", (void *)n_bb_setdevice},
+        {"nvnBufferBuilderSetStorage", (void *)n_bb_setstorage},
+        {"nvnBufferBuilderGetSize", (void *)n_bb_getsize},
+        {"nvnBufferBuilderGetMemoryPool", (void *)n_bb_getpool},
+        {"nvnBufferBuilderGetMemoryOffset", (void *)n_bb_getoff},
+        {"nvnBufferInitialize", (void *)n_buf_init},
+        {"nvnBufferFinalize", (void *)n_buf_fin},
+        {"nvnBufferMap", (void *)n_buf_map},
+        {"nvnBufferGetMemoryPool", (void *)n_buf_getpool},
+        {"nvnBufferGetMemoryOffset", (void *)n_buf_getoff},
+        {"nvnBufferFlushMappedRange", (void *)n_buf_range3},
+        {"nvnBufferInvalidateMappedRange", (void *)n_buf_range3},
     };
     for (unsigned i = 0; i < sizeof known / sizeof known[0]; i++)
         if (!strcmp(known[i].nm, name)) return known[i].fn;
