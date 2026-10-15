@@ -114,3 +114,17 @@ _dm_gate:
     ldr x30, [sp, #240]
     add sp, sp, #800
     ret
+
+// 客体线程起点（照 d2r-mobile）：切到 SDK 给的客体栈，x0 = 参数调入口；
+// Horizon 线程须经 ExitThread 退出，入口返回即报错。
+    .globl _dm_thread_enter
+    .p2align 2
+_dm_thread_enter:
+    mov sp, x2
+    mov x29, #0
+    mov x16, x0
+    mov x0, x1
+    adr x30, 1f
+    br x16
+1:  bl _dm_thread_returned
+    brk #0
