@@ -162,6 +162,8 @@ static uint64_t svc_impl(int num, uint64_t *x) {
     }
 }
 
+static int g_last_svc = -1;   // 崩溃现场用
+
 uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
     for (unsigned i = gate_h(ret_addr);; i = (i + 1) & ((1u << GATE_BITS) - 1)) {
         const gate_t *g = &g_gate[i];
@@ -171,12 +173,41 @@ uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
                 regs[g->arg] = t;
                 return t;
             }
+            g_last_svc = g->arg;
+            static uint8_t hit[256];
+            if (g->arg < 256 && !hit[g->arg]++) LOG("svc#%d 首次命中（x0=%#llx）", g->arg, (unsigned long long)regs[0]);
             uint64_t r = svc_impl(g->arg, regs);
-            if (r == 0xF001) { static uint8_t seen[256]; if (g->arg < 256 && !seen[g->arg]++) LOG("svc#%d 未实现（x0=%#llx）", g->arg, (unsigned long long)regs[0]); }
+            if (r == 0xF001) LOG("svc#%d 未实现 → 0xF001", g->arg);
             return r;
         }
         if (!g->ret) die("unknown gate at %#llx", (unsigned long long)ret_addr);
     }
+}
+
+// ---------- 崩溃现场：PC 归属到模块内偏移 + 最近一次 svc ----------
+#include <signal.h>
+#include <ucontext.h>
+static void fault_dump(int sig, siginfo_t *si, void *uc_) {
+    ucontext_t *uc = uc_;
+    uint64_t pc = uc->uc_mcontext->__ss.__pc, lr = uc->uc_mcontext->__ss.__lr;
+    const char *w = "非模块区";
+    char buf[64] = "";
+    for (int i = 0; i < g_nmod; i++) {
+        uint64_t b = (uint64_t)g_mod[i].base;
+        if (pc >= b && pc < b + g_mod[i].size) { snprintf(buf, sizeof buf, "%s+%#llx", g_mod[i].name, (unsigned long long)(pc - b)); w = buf; break; }
+    }
+    fprintf(stderr, "[dm] FAULT sig=%d addr=%p pc=%#llx(%s) lr=%#llx 最近svc#%d\n",
+            sig, si->si_addr, (unsigned long long)pc, w, (unsigned long long)lr, g_last_svc);
+    _exit(70);
+}
+static void watchdog(int sig) { (void)sig; fprintf(stderr, "[dm] 看门狗 120 秒到期（最近svc#%d）\n", g_last_svc); _exit(71); }
+static void diag_install(void) {
+    struct sigaction sa = {0};
+    sa.sa_sigaction = fault_dump; sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &sa, NULL); sigaction(SIGBUS, &sa, NULL); sigaction(SIGILL, &sa, NULL);
+    struct sigaction sw = {0};
+    sw.sa_handler = watchdog;
+    sigaction(SIGALRM, &sw, NULL);
 }
 
 // ---------- 装载 ----------
@@ -340,7 +371,8 @@ static void guest_main(void) {
 
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: dmhost <产物目录> [模块…]\n"); return 2; }
-    alarm(120);   // CI 看门狗：两分钟内没走完启动序就终止，日志仍由 SIGALRM 前的输出保留
+    diag_install();
+    alarm(120);   // CI 看门狗：两分钟内没走完启动序就由 watchdog 记录后终止
     const char *names[MAX_MOD]; int n = 0;
     for (int i = 2; i < argc && n < MAX_MOD; i++) names[n++] = argv[i];
     if (!n) { names[n++] = "main"; names[n++] = "sdk"; names[n++] = "subsdk0"; }
