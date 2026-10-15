@@ -369,23 +369,26 @@ int g_nmod_ref;
 // ---------- 服务层初始化按名接管（d2r-mobile hle_sdkinit.c 配方）----------
 // nninitInitializeSdkModule 调的各服务初始化在真机上连 Horizon 系统服务（IPC），
 // 宿主没有服务进程：接管成空操作，服务接口用到时再逐个接管（hle_fs 等）。
-// 接管函数按客体 ABI 调用（参数在 x0..），与宿主 C ABI 一致。
-typedef void (*hle_fn0)(void);
-static void h_noop(void) {}
-static void h_excstack(uint64_t *out) {
+// 接管函数按客体 ABI 调用（参数在 x0..），返回值 = nn::Result，必须显式回 0——
+// 声明成 void 会让 w0 留下垃圾，客体 R_ABORT_UNLESS 一查非 0 就走 AbortImpl。
+typedef uint32_t (*hle_fn0)(void);
+static uint32_t h_noop(void) { return 0; }
+static uint32_t h_excstack(uint64_t *out) {
     mem_init();
     uint8_t *es = g_stack + STACK_CAP - 0x8000;   // 栈区顶段：线程栈自底向上分配，互不冲突
     if (mprotect(es, 0x4000, PROT_READ | PROT_WRITE)) die("异常栈 mprotect");
     out[0] = (uint64_t)(es + 0x4000);   // Horizon 习惯：报向下生长的栈顶
     out[1] = 0x4000;
     LOG("init 接管：客体异常栈 ← %p+%#x", es, 0x4000);
+    return 0;
 }
 // fs 链占位：SetAllocator 会经 IsEnabledAccessLog→GetGlobalAccessLogMode 懒连接
 // fsp-srv 服务对象（svc 层空指针），按出参粒度接管；MountRom 三件套先占位走通 nnMain。
-static void h_logmode(uint32_t *out) { if (out) *out = 0; }
-static void h_romcache(uint64_t *out) { if (out) *out = 0x1000000; }
-static void h_mountrom(const char *name, void *buf, uint64_t sz) {
+static uint32_t h_logmode(uint32_t *out) { if (out) *out = 0; return 0; }
+static uint32_t h_romcache(uint64_t *out) { if (out) *out = 0x1000000; return 0; }
+static uint32_t h_mountrom(const char *name, void *buf, uint64_t sz) {
     LOG("MountRom %s buf=%p size=%#llx（占位，RomFS 未实装）", name ? name : "?", buf, (unsigned long long)sz);
+    return 0;
 }
 typedef struct { const char *name; hle_fn0 fn; } hle_ent;
 static hle_fn0 force_lookup(const char *name) {
