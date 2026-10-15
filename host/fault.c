@@ -65,11 +65,14 @@ static void on_abort(int sig, siginfo_t *si, void *uc_) {
         ucontext_t *uc = uc_;
         uint64_t pc = uc->uc_mcontext->__ss.__pc, lr = uc->uc_mcontext->__ss.__lr;
         uint64_t sp = uc->uc_mcontext->__ss.__sp, fp = uc->uc_mcontext->__ss.__fp;
+        uint64_t x0 = uc->uc_mcontext->__ss.__x[0], x1 = uc->uc_mcontext->__ss.__x[1];
+        uint64_t x2 = uc->uc_mcontext->__ss.__x[2], x3 = uc->uc_mcontext->__ss.__x[3];
         char w[64];
         where_of(pc, w, sizeof w);
-        fprintf(stderr, "[dm] HOST SIGTRAP pc=%#llx(%s) lr=%#llx sp=%#llx fp=%#llx 最近svc#%d\n",
+        fprintf(stderr, "[dm] HOST SIGTRAP pc=%#llx(%s) lr=%#llx sp=%#llx fp=%#llx x0=%#llx x1=%#llx x2=%#llx x3=%#llx 最近svc#%d\n",
                 (unsigned long long)pc, w, (unsigned long long)lr, (unsigned long long)sp,
-                (unsigned long long)fp, g_last_svc);
+                (unsigned long long)fp, (unsigned long long)x0, (unsigned long long)x1,
+                (unsigned long long)x2, (unsigned long long)x3, g_last_svc);
         guest_backtrace(fp);
         _exit(89);
     }
