@@ -112,15 +112,18 @@ static void *guest_heap(void) {
     return h;
 }
 
-// svc 处理器：号表与语义按 bootsim 实证清单（首个 arm64 运行：41→29→38 后等待）。
+// svc 处理器：号码表按本 SDK 二进制符号名实证（build/svc_map.txt，老固件世代编号，
+// 与现代 Horizon 表不同——svc#41=GetInfo、svc#29=SignalProcessWideKey、svc#38=Break）。
 // 返回值 = Result（0 成功）；未实现的返回 0xF001 并记名一次。
+static uint32_t g_handle_next = 0x10;   // 假句柄分配（线程/事件）
+
 static uint64_t svc_impl(int num, uint64_t *x) {
     switch (num) {
     case 1:  // SetHeapSize(size) → x1 = 堆地址
         x[1] = (uint64_t)guest_heap();
         return 0;
-    case 4: {  // QueryMemory(out MemoryInfo, addr)：堆区=InUse，其余=Unmapped
-        uint64_t addr = x[1];
+    case 6: {  // QueryMemory(out MemoryInfo 0x28, out PageInfo, addr)：堆=InUse，其余=Free
+        uint64_t addr = x[2];
         void *h = guest_heap();
         struct { uint64_t base, size; uint32_t state, attr, ipc, perm, pad; } mi = {0};
         if ((uint64_t)h <= addr && addr < (uint64_t)h + 0x10000000) {
@@ -129,33 +132,114 @@ static uint64_t svc_impl(int num, uint64_t *x) {
             mi.base = addr & ~0x3FFFul; mi.size = 0x4000; mi.state = 0;
         }
         memcpy((void *)(uintptr_t)x[0], &mi, sizeof mi);
+        if (x[1]) *(uint32_t *)(uintptr_t)x[1] = 0;
         return 0;
     }
-    case 23:  // GetSystemTick（19.2 MHz）
-        return now_ns() * 12 / 625;
-    case 6:   // ExitProcess：明确记录后退出
-        LOG("svc#6 ExitProcess（启动序中退出）");
+    case 7:  // ExitProcess
+        LOG("svc#7 ExitProcess");
         _exit(0);
-    case 11: {  // GetThreadPriority(out) ← 44
-        *(uint32_t *)(uintptr_t)x[0] = 44;
+    case 8:  // CreateThread(out h, entry, arg, sp, prio, core)：单线程模拟，发假句柄不真跑
+        *(uint32_t *)(uintptr_t)x[0] = g_handle_next++;
+        return 0;
+    case 9:  // StartThread(h)
+        return 0;
+    case 10: // ExitThread
+        LOG("svc#10 ExitThread on main?");
+        return 0;
+    case 11: // SleepThread(ns)
+        return 0;
+    case 12: {  // GetThreadPriority(out i32, h) ← 44
+        *(int32_t *)(uintptr_t)x[0] = 44;
         return 0;
     }
-    case 12:  // SetThreadPriority
+    case 13: // SetThreadPriority(h, prio)
         return 0;
-    case 29: {  // GetThreadCoreMask(out_mask, out_pref, handle)
-        *(uint64_t *)(uintptr_t)x[0] = 1;
-        *(int32_t *)(uintptr_t)x[1] = 0;
-        return 0;
-    }
-    case 33:  // SetThreadActivity
-        return 0;
-    case 38: {  // GetThreadActivity(out) ← 0（可运行）
+    case 14: {  // GetThreadCoreMask(out i32, out u64 mask, h)
         *(int32_t *)(uintptr_t)x[0] = 0;
+        *(uint64_t *)(uintptr_t)x[1] = 1;
         return 0;
     }
-    case 41:  // GetThreadContext3：对当前线程返回错误（0xF401），不写客体内存——
-              // 先验证 41 号门之后的 PC=0 是否与写上下文缓冲有关
-        return 0xF401;
+    case 15: // SetThreadCoreMask
+        return 0;
+    case 16: // GetCurrentProcessorNumber
+        return 0;
+    case 22: // CloseHandle
+        return 0;
+    case 24: {  // WaitSynchronization(out idx, handles, n, timeout)：恒满足
+        if (x[0]) *(int32_t *)(uintptr_t)x[0] = 0;
+        return 0;
+    }
+    case 25: // CancelSynchronization
+        return 0;
+    case 26: // ArbitrateLock
+    case 27: // ArbitrateUnlock
+    case 28: // WaitProcessWideKeyAtomic
+    case 29: // SignalProcessWideKey
+        return 0;
+    case 30: // GetSystemTick（19.2 MHz）
+        return now_ns() * 12 / 625;
+    case 31: {  // ConnectToNamedPort(out h, name)
+        char nm[64] = {0};
+        for (int i = 0; i < 63; i++) {
+            uint8_t c = *(const uint8_t *)(uintptr_t)(x[1] + i);
+            if (!c) break;
+            nm[i] = (char)c;
+        }
+        LOG("svc#31 ConnectToNamedPort → %s", nm);
+        *(uint32_t *)(uintptr_t)x[0] = g_handle_next++;
+        return 0;
+    }
+    case 38: {  // Break(reason, addr, size)：Debug 断点继续，致命断点退出
+        uint64_t reason = x[0];
+        LOG("svc#38 Break reason=%#llx addr=%#llx size=%#llx", (unsigned long long)reason,
+            (unsigned long long)x[1], (unsigned long long)x[2]);
+        if (reason & 1) return 0;   // BreakReason_Debug：仅停一下，继续
+        _exit(81);
+    }
+    case 39: {  // OutputDebugString(ptr, len)：打出客体自己的诊断文本
+        size_t len = (size_t)x[1];
+        if (len > 512) len = 512;
+        char buf[513];
+        memcpy(buf, (void *)(uintptr_t)x[0], len);
+        buf[len] = 0;
+        LOG("客体调试串: %s", buf);
+        return 0;
+    }
+    case 36: {  // GetProcessId(out u64, h)
+        *(uint64_t *)(uintptr_t)x[0] = 0x50;
+        return 0;
+    }
+    case 37: {  // GetThreadId(out u64, h)
+        *(uint64_t *)(uintptr_t)x[0] = 0x60 + g_handle_next;
+        return 0;
+    }
+    case 41: {  // GetInfo(out u64, InfoType, handle, key)
+        uint64_t t = x[1];
+        uint64_t v = 0;
+        switch (t) {
+        case 12: v = 0x8000000000ull; break;            // 地址空间上界（AslrSpaceManager 用）
+        case 0:  v = 0x10000000ull; break;              // TotalMemorySize
+        case 1:  v = 0x1000000ull; break;               // UsedMemorySize
+        case 6:  v = 0x10000000ull; break;              // 内存相关（观察值）
+        case 16: v = 0x7fffffffffull; break;            // 最大用户地址
+        default: LOG("svc#41 GetInfo 未知 type=%llu key=%#llx", (unsigned long long)t,
+                     (unsigned long long)x[3]); return 0xF001;
+        }
+        *(uint64_t *)(uintptr_t)x[0] = v;
+        return 0;
+    }
+    case 48: {  // GetResourceLimitLimitValue(out i64, h, resource)
+        *(int64_t *)(uintptr_t)x[0] = 0x100000000ll;
+        return 0;
+    }
+    case 49: {  // GetResourceLimitCurrentValue(out i64, h, resource)
+        *(int64_t *)(uintptr_t)x[0] = 0x8000000ll;
+        return 0;
+    }
+    case 51: {  // GetThreadContext3(out ThreadContext 0x328, h)
+        memset((void *)(uintptr_t)x[0], 0, 0x328);
+        return 0;
+    }
     default:
         return 0xF001;
     }
