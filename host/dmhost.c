@@ -5,6 +5,8 @@
 // 本文件是 Apple silicon 上跑通「SDK 初始化 → nnMain」的最小骨架；svc 处理器按
 // bootsim 的实证清单逐个补齐（hle_svc_dispatch 里未实现的记名返回错误码）。
 // 构建：make -C host （clang -arch arm64；本仓库的 Intel Mac 只做交叉编译验证）
+#include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -385,9 +387,16 @@ static uint32_t h_excstack(uint64_t *out) {
 // fs 链占位：SetAllocator 会经 IsEnabledAccessLog→GetGlobalAccessLogMode 懒连接
 // fsp-srv 服务对象（svc 层空指针），按出参粒度接管；MountRom 三件套先占位走通 nnMain。
 static uint32_t h_logmode(uint32_t *out) { if (out) *out = 0; return 0; }
-static uint32_t h_romcache(uint64_t *out) { if (out) *out = 0x1000000; return 0; }
+static uint32_t h_romcache(uint64_t *out) { if (out) *out = 0x1000; return 0; }
+static char g_outdir[1024];                  // 产物目录（RomFS 在 <out>/RomFS）
+static void rom_mount(const char *, const char *);
 static uint32_t h_mountrom(const char *name, void *buf, uint64_t sz) {
-    LOG("MountRom %s buf=%p size=%#llx（占位，RomFS 未实装）", name ? name : "?", buf, (unsigned long long)sz);
+    (void)buf; (void)sz;
+    const char *dir = getenv("DM_ROMFS");
+    char dflt[1100];
+    if (!dir) { snprintf(dflt, sizeof dflt, "%s/RomFS", g_outdir[0] ? g_outdir : "out"); dir = dflt; }
+    rom_mount(name, dir);
+    LOG("MountRom %s → %s（目录直读）", name, dir);
     return 0;
 }
 // 诊断接管：SDK 的中止/断言路径把 file/func/expr/line/Result 直接交给我们打印，
@@ -401,6 +410,127 @@ static uint32_t h_assertfail(int type, const char *file, const char *func, const
     LOG("客体断言 OnAssertionFailure：type=%d file=%s func=%s expr=%s line=%d", type,
         file ? file : "?", func ? func : "?", expr ? expr : "?", line);
     _exit(84);
+}
+
+// ---------- 文件系统层（d2r hle_fs.c 的目录直读方案：挂载名 → 宿主目录） ----------
+// 符号面按 PQ main 的导入清单实证（14 个）：OpenFile / ReadFile×4 / GetFileSize /
+// CloseFile / FlushFile / WriteFile / GetEntryType / OpenDirectory / ReadDirectory /
+// CloseDirectory / Unmount。RomFS 已离线解包成目录随产物分发（out/RomFS）。
+#define MAX_MNT 8
+#define MAX_FH 256
+#define MAX_DH 32
+static struct { char name[16]; char dir[1024]; } g_mnt[MAX_MNT];
+static int g_nmnt;
+static int g_fh[MAX_FH];            // 宿主 fd（1 基句柄，0 = 空）
+static struct { DIR *d; int mode; char path[1024]; } g_dh[MAX_DH];
+
+static void rom_mount(const char *name, const char *dir) {
+    if (g_nmnt >= MAX_MNT) die("挂载表满");
+    strlcpy(g_mnt[g_nmnt].name, name, sizeof g_mnt[0].name);
+    strlcpy(g_mnt[g_nmnt].dir, dir, sizeof g_mnt[0].dir);
+    g_nmnt++;
+}
+// "rom:/Data/x" → 宿主路径；返回挂载下标，-1 = 无此挂载
+static int host_path(const char *guest, char *out, size_t n) {
+    const char *colon = strchr(guest, ':');
+    if (!colon || colon[1] != '/') return -1;
+    size_t mnlen = (size_t)(colon - guest);
+    for (int i = 0; i < g_nmnt; i++)
+        if (strlen(g_mnt[i].name) == mnlen && !strncmp(g_mnt[i].name, guest, mnlen)) {
+            snprintf(out, n, "%s%s", g_mnt[i].dir, colon + 1);
+            return i;
+        }
+    return -1;
+}
+#define FS_ENOENT 0x202   // nn::fs PathNotFound（模块 2）
+
+static uint32_t h_openfile(uint64_t *out, const char *path, int mode) {
+    char hp[1100];
+    if (host_path(path, hp, sizeof hp) < 0) { LOG("OpenFile 未挂载：%s", path); return FS_ENOENT; }
+    int hm = ((mode & 3) == 1) ? O_RDONLY : ((mode & 3) == 2) ? O_WRONLY | O_CREAT : O_RDWR | O_CREAT;
+    int fd = open(hp, hm, 0644);
+    if (fd < 0) return FS_ENOENT;   // 只读区里缺文件按未找到回（Unity 会探测可选资源）
+    int h = 1;
+    while (h < MAX_FH && g_fh[h]) h++;
+    if (h >= MAX_FH) { close(fd); return 0xF701; }
+    g_fh[h] = fd;
+    *out = (uint64_t)h;
+    return 0;
+}
+static uint32_t h_readfile_n(uint64_t *out, uint64_t h, int64_t off, void *buf, uint64_t n) {
+    if (!h || h >= MAX_FH || !g_fh[h]) return 0xF601;
+    ssize_t r = pread(g_fh[h], buf, n, (off_t)off);
+    if (r < 0) return 0xFA01;
+    if (out) *out = (uint64_t)r;
+    return 0;
+}
+static uint32_t h_getfilesize(int64_t *out, uint64_t h) {
+    if (!h || h >= MAX_FH || !g_fh[h]) return 0xF601;
+    struct stat st;
+    if (fstat(g_fh[h], &st)) return 0xFA01;
+    *out = st.st_size;
+    return 0;
+}
+static uint32_t h_closefile(uint64_t h) {
+    if (h && h < MAX_FH && g_fh[h]) { close(g_fh[h]); g_fh[h] = 0; }
+    return 0;
+}
+static uint32_t h_flushfile(uint64_t h) { (void)h; return 0; }
+static uint32_t h_getentrytype(int32_t *out, const char *path) {
+    char hp[1100];
+    if (host_path(path, hp, sizeof hp) < 0) return FS_ENOENT;
+    struct stat st;
+    if (stat(hp, &st)) return FS_ENOENT;
+    *out = S_ISDIR(st.st_mode) ? 1 : 2;   // DirectoryEntryType: 1=目录 2=文件
+    return 0;
+}
+static uint32_t h_opendirectory(uint64_t *out, const char *path, int mode) {
+    char hp[1100];
+    if (host_path(path, hp, sizeof hp) < 0) return FS_ENOENT;
+    DIR *d = opendir(hp);
+    if (!d) return FS_ENOENT;
+    int h = 1;
+    while (h < MAX_DH && g_dh[h].d) h++;
+    if (h >= MAX_DH) { closedir(d); return 0xF701; }
+    g_dh[h] = (typeof(g_dh[0])){d, mode, {0}};
+    strlcpy(g_dh[h].path, hp, sizeof g_dh[0].path);
+    *out = (uint64_t)h;
+    return 0;
+}
+// DirectoryEntry：name[0x301] type@0x304 size@0x308（步长 0x310）
+static uint32_t h_readdirectory(int64_t *out, void *ents, uint64_t h, int64_t max) {
+    *out = 0;
+    if (!h || h >= MAX_DH || !g_dh[h].d) return 0xF601;
+    int64_t cnt = 0;
+    uint8_t *e = ents;
+    while (cnt < max) {
+        struct dirent *de = readdir(g_dh[h].d);
+        if (!de) break;
+        if (de->d_name[0] == '.') continue;
+        int want = (de->d_type == DT_DIR) ? 1 : 2;
+        if (g_dh[h].mode && !(g_dh[h].mode & want) && g_dh[h].mode != 3) continue;
+        uint8_t *slot = e + (size_t)cnt * 0x310;
+        memset(slot, 0, 0x310);
+        strlcpy((char *)slot, de->d_name, 0x301);
+        *(int32_t *)(slot + 0x304) = want;
+        *(int64_t *)(slot + 0x308) = 0;
+        struct stat st;
+        if (de->d_type != DT_DIR && fstatat(dirfd(g_dh[h].d), de->d_name, &st, 0) == 0)
+            *(int64_t *)(slot + 0x308) = st.st_size;
+        cnt++;
+    }
+    *out = cnt;
+    return 0;
+}
+static uint32_t h_closedirectory(uint64_t h) {
+    if (h && h < MAX_DH && g_dh[h].d) { closedir(g_dh[h].d); g_dh[h].d = NULL; }
+    return 0;
+}
+static uint32_t h_writefile(uint64_t h, int64_t off, const void *buf, uint64_t n, const void *opt) {
+    (void)opt;
+    if (!h || h >= MAX_FH || !g_fh[h]) return 0xF601;
+    ssize_t r = pwrite(g_fh[h], buf, n, (off_t)off);
+    return r < 0 ? 0xFA01 : 0;
 }
 typedef struct { const char *name; hle_fn0 fn; } hle_ent;
 static hle_fn0 force_lookup(const char *name) {
@@ -431,6 +561,21 @@ static hle_fn0 force_lookup(const char *name) {
         {"_ZN2nn4diag6detail9AbortImplEPKcS3_S3_iPKNS_6ResultEPKNS_2os17UserExceptionInfoES3_z", (hle_fn0)h_abortimpl},
         {"_ZN2nn4diag6detail9AbortImplEPKcS3_S3_iS3_z", (hle_fn0)h_abortimpl},
         {"_ZN2nn4diag6detail18OnAssertionFailureENS0_13AssertionTypeEPKcS4_S4_i", (hle_fn0)h_assertfail},
+        // fs 读面（main 导入清单实证）→ 宿主 open/pread/opendir/stat
+        {"_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", (hle_fn0)h_openfile},
+        {"_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", (hle_fn0)h_readfile_n},
+        {"_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvmRKNS0_9ReadOptionE", (hle_fn0)h_readfile_n},
+        {"_ZN2nn2fs8ReadFileENS0_10FileHandleElPvm", (hle_fn0)h_readfile_n},
+        {"_ZN2nn2fs8ReadFileENS0_10FileHandleElPvmRKNS0_9ReadOptionE", (hle_fn0)h_readfile_n},
+        {"_ZN2nn2fs11GetFileSizeEPlNS0_10FileHandleE", (hle_fn0)h_getfilesize},
+        {"_ZN2nn2fs9CloseFileENS0_10FileHandleE", (hle_fn0)h_closefile},
+        {"_ZN2nn2fs9FlushFileENS0_10FileHandleE", (hle_fn0)h_flushfile},
+        {"_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", (hle_fn0)h_writefile},
+        {"_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc", (hle_fn0)h_getentrytype},
+        {"_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci", (hle_fn0)h_opendirectory},
+        {"_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandleEl", (hle_fn0)h_readdirectory},
+        {"_ZN2nn2fs14CloseDirectoryENS0_15DirectoryHandleE", (hle_fn0)h_closedirectory},
+        {"_ZN2nn2fs7UnmountEPKc", h_noop},
     };
     for (unsigned i = 0; i < sizeof tab / sizeof tab[0]; i++)
         if (!strcmp(tab[i].name, name)) return tab[i].fn;
@@ -605,6 +750,7 @@ static void guest_main(void) {
 
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: dmhost <产物目录> [模块…]\n"); return 2; }
+    strlcpy(g_outdir, argv[1], sizeof g_outdir);
     diag_install();
     alarm(120);   // CI 看门狗：两分钟内没走完启动序就由 watchdog 记录后终止
     const char *names[MAX_MOD]; int n = 0;
