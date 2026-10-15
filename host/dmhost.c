@@ -103,111 +103,148 @@ static void gate_register(uint64_t ret, const char *kind, int arg) {
 static uint64_t now_ns(void) { return (uint64_t)clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW); }
 
 // ---------- 客体地址空间（照 d2r-mobile hle_svc.c 的架构：预留一整块，按 Horizon 分区） ----------
-#define RESERVE (5ull << 30)          // 5 GB：alias/stack + 4 GB 堆区，只占地址不占内存
-static uint8_t *g_as;                 // 客体地址空间基址
+// SDK 的 AddressRegionManager 以 alias 基址为起点硬扫 1 GB（sdk+0x8cc3c +0x24 实证
+// mov w9,#0x40000000），alias 区给足 1 GB；GetAslrSpaceEnd = GetInfo(12)+13、
+// GetStackGuardEnd = GetInfo(14)+15（sdk+0x8fb80 / 0x8fc04 实证，均为基址+大小）。
+#define RESERVE (6ull << 30)          // 6 GB：d2r 实测 iOS 无扩展寻址权限时的单次预留上限
+#define ALIAS_CAP 0x40000000ull       // alias 1 GB（g_as+0x10000000 … g_as+0x50000000）
+#define STACK_CAP 0x10000000ull       // 栈区 256 MB（g_as+0x50000000 …）
+#define HEAP_CAP  (RESERVE - 0x60000000ull)   // 堆区从 g_as+0x60000000 到块尾
+static uint8_t *g_as;                 // 客体地址空间基址（= ASLR 区基址）
 static uint8_t *g_alias, *g_stack, *g_heap;
+static size_t g_heap_cur;             // SetHeapSize 已提交大小
 static void mem_init(void) {
     if (g_as) return;
     g_as = mmap(NULL, RESERVE, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (g_as == MAP_FAILED) die("预留客体地址空间失败");
-    g_alias = g_as + 0x10000000;      // alias 512 MB
-    g_stack = g_as + 0x30000000;      // 栈区 256 MB
-    g_heap  = g_as + 0x40000000;      // 堆区（到块尾 ≈ 4 GB）
+    g_alias = g_as + 0x10000000;
+    g_stack = g_as + 0x50000000;
+    g_heap  = g_as + 0x60000000;
     LOG("客体地址空间 %p +%#llx（alias %p / stack %p / heap %p）", g_as, (unsigned long long)RESERVE, g_alias, g_stack, g_heap);
 }
 
-// 客体堆（SetHeapSize / QueryMemory 共用）
-static void *guest_heap(void) {
-    mem_init();
-    return g_heap;
+// 已映射区间登记（MapMemory 线程栈），QueryMemory 据此回报（d2r 配方）
+#define MAX_MAP 256
+static struct { uint64_t base, size, src; } g_map[MAX_MAP];
+static int g_nmap;
+static int map_find(uint64_t a, uint64_t n) {
+    for (int i = 0; i < g_nmap; i++) if (a < g_map[i].base + g_map[i].size && g_map[i].base < a + n) return i + 1;
+    return 0;
 }
 
-// svc 处理器：号码表按本 SDK 二进制符号名实证（build/svc_map.txt，老固件世代编号，
-// 与现代 Horizon 表不同——svc#41=GetInfo、svc#29=SignalProcessWideKey、svc#38=Break）。
-// 返回值 = Result（0 成功）；未实现的返回 0xF001 并记名一次。
-static uint32_t g_handle_next = 0x10;   // 假句柄分配（线程/事件）
+// svc 处理器：号码按 build/svc_map.txt（老固件世代编号）。
+// 出参契约按各包装函数 svc 后指令实证（全量扫描 106 个门）：小标量一律从寄存器回——
+// 包装函数自己 str x1/w1（GetInfo 值=x1、SetHeapSize 基址=x1、句柄=w1、PageInfo=w1、
+// GetThreadCoreMask=core w1 + mask x2、资源限值=x1）；只有大结构体（MemoryInfo、
+// ThreadContext）由本层直接写指针。此前把值写进 out 指针会被包装函数用残留寄存器
+// 覆盖——addr=2 正是 GetInfo 残留 x1=InfoType 常量被当地址用。
+static uint32_t g_handle_next = 0x100;   // 假句柄分配
+
+static uint64_t image_bytes(void) {
+    uint64_t n = 0;
+    for (int i = 0; i < g_nmod; i++) n += (g_mod[i].size + 0xfff) & ~0xfffull;
+    return n;
+}
 
 static uint64_t svc_impl(int num, uint64_t *x) {
     switch (num) {
     case 1: {  // SetHeapSize(size) → x1 = 堆地址（在预留块堆区内提交 RW）
         mem_init();
         uint64_t size = x[1];
-        if (size > RESERVE - 0x40000000) return 0xCE011;   // 超出堆区：让 SDK 按原版步进减 2 MB 重试
-        if (mprotect(g_heap, (size_t)size, PROT_READ | PROT_WRITE)) die("SetHeapSize mprotect");
+        if (size > HEAP_CAP) return 0xCE011;   // 超出堆区：让 SDK 按原版步进减 2 MB 重试
+        if (size > g_heap_cur) { if (mprotect(g_heap + g_heap_cur, size - g_heap_cur, PROT_READ | PROT_WRITE)) die("SetHeapSize mprotect"); }
+        else if (size < g_heap_cur) mprotect(g_heap + size, g_heap_cur - size, PROT_NONE);
+        g_heap_cur = size;
         x[1] = (uint64_t)g_heap;
         return 0;
     }
-    case 6: {  // QueryMemory(out MemoryInfo 0x28, out PageInfo, addr)：按客体地址空间分区回报
+    case 2: case 3: return 0;   // SetMemoryPermission / SetMemoryAttribute
+    case 4: {  // MapMemory(dst, src, size)：SDK 建线程时把堆上的栈搬进栈区
         mem_init();
-        uint64_t addr = x[2], base = 0, esz = 0;
-        uint32_t state = 0, perm = 0;
-        if ((uint64_t)g_as <= addr && addr < (uint64_t)g_as + RESERVE) {
-            if (addr < (uint64_t)g_alias) { base = (uint64_t)g_as; esz = 0x10000000; }
-            else if (addr < (uint64_t)g_alias + 0x20000000) { base = (uint64_t)g_alias; esz = 0x20000000; state = 0x3; perm = 3; }
-            else if (addr < (uint64_t)g_stack) { base = (uint64_t)g_alias + 0x20000000; esz = 0x10000000; }
-            else if (addr < (uint64_t)g_heap) { base = (uint64_t)g_stack; esz = 0x10000000; state = 0xB; perm = 3; }
-            else { base = (uint64_t)g_heap; esz = RESERVE - 0x40000000; state = 0x3; perm = 3; }
-        } else {
-            for (int i = 0; i < g_nmod; i++) {   // 模块映像 = 代码区
-                uint64_t b = (uint64_t)g_mod[i].base;
-                if (addr >= b && addr < b + g_mod[i].size) { base = b; esz = g_mod[i].size; state = 3; perm = 5; break; }
+        uint64_t dst = x[0], src = x[1], size = x[2];
+        if ((uint8_t *)(uintptr_t)dst < g_stack || (uint8_t *)(uintptr_t)dst + size > g_stack + STACK_CAP || map_find(dst, size)) return 0xDC01;
+        uint64_t lo = dst & ~0x3FFFull, hi = (dst + size + 0x3FFF) & ~0x3FFFull;
+        if (mprotect((void *)(uintptr_t)lo, hi - lo, PROT_READ | PROT_WRITE)) die("MapMemory mprotect");
+        memcpy((void *)(uintptr_t)dst, (void *)(uintptr_t)src, size);
+        if (g_nmap >= MAX_MAP) die("映射表满");
+        g_map[g_nmap++] = (typeof(g_map[0])){dst, size, src};
+        return 0;
+    }
+    case 5: {  // UnmapMemory(dst, src, size)：内容搬回源区
+        uint64_t dst = x[0], src = x[1], size = x[2];
+        int k = map_find(dst, size);
+        if (!k || g_map[k - 1].base != dst || g_map[k - 1].size != size || g_map[k - 1].src != src) return 0xD401;
+        memcpy((void *)(uintptr_t)src, (void *)(uintptr_t)dst, size);
+        g_map[k - 1] = g_map[--g_nmap];
+        return 0;
+    }
+    case 6: {  // QueryMemory(MemoryInfo* x0, PageInfo*, addr x2) → w1 = pageinfo
+        mem_init();   // 结构体布局按 d2r：base(0x00) size(0x08) state(0x10) attr(0x14) perm(0x18) ipc(0x1c)
+        uint64_t mi = x[0], addr = x[2];
+        uint8_t *a = (uint8_t *)(uintptr_t)addr;
+        uint64_t base = 0, esz = 0, state = 0, perm = 0;
+        int k;
+        if (a >= g_heap && a < g_heap + g_heap_cur) { base = (uint64_t)g_heap; esz = g_heap_cur; state = 5; perm = 3; }
+        else if ((k = map_find(addr, 1))) { base = g_map[k - 1].base; esz = g_map[k - 1].size; state = 0xB; perm = 3; }
+        else if (a >= g_as && a < g_as + RESERVE) {   // 预留块内未提交：回报到相邻边界为止的空闲区
+            uint64_t lo = (uint64_t)g_as, hi = (uint64_t)g_as + RESERVE;
+            if (a >= g_heap) lo = (uint64_t)g_heap + g_heap_cur;
+            else if (hi > (uint64_t)g_heap) hi = (uint64_t)g_heap;
+            for (int i = 0; i < g_nmap; i++) {
+                uint64_t e = g_map[i].base + g_map[i].size;
+                if (e <= addr && e > lo) lo = e;
+                if (g_map[i].base > addr && g_map[i].base < hi) hi = g_map[i].base;
             }
-            if (!esz) {   // 宿主当前线程栈 → 状态 0xB（SDK 主线程记录用，见 d2r 注释）
+            base = lo; esz = hi - lo;
+        } else {
+            for (int i = 0; i < g_nmod && !esz; i++) {   // 模块映像 = 代码区
+                uint64_t b = (uint64_t)g_mod[i].base;
+                if (addr >= b && addr < b + g_mod[i].size) { base = b; esz = g_mod[i].size; state = 3; perm = 5; }
+            }
+            if (!esz) {   // 宿主当前线程栈 → 状态 0xB（SDK 主线程记录拿 sp 查这里，见 d2r 注释）
                 uint64_t top = (uint64_t)pthread_get_stackaddr_np(pthread_self());
                 uint64_t ssz = pthread_get_stacksize_np(pthread_self());
                 if (addr < top && addr >= top - ssz) { base = top - ssz; esz = ssz; state = 0xB; perm = 3; }
-                else { base = addr & ~0x3FFFull; esz = 0x4000; }
+                else { base = addr & ~0x3FFFull; esz = 0x4000; state = 3; perm = 5; }
             }
         }
-        struct { uint64_t base, size; uint32_t state, attr, ipc, perm, pad; } mi = {base, esz, state, 0, 0, perm, 0};
-        memcpy((void *)(uintptr_t)x[0], &mi, sizeof mi);
-        if (x[1]) *(uint32_t *)(uintptr_t)x[1] = 0;
+        if (mi) {
+            memset((void *)(uintptr_t)mi, 0, 0x28);
+            uint64_t *m = (uint64_t *)(uintptr_t)mi;
+            m[0] = base; m[1] = esz;
+            ((uint32_t *)m)[4] = (uint32_t)state; ((uint32_t *)m)[6] = (uint32_t)perm;
+        }
+        x[1] = 0;   // PageInfo
         return 0;
     }
     case 7:  // ExitProcess
         LOG("svc#7 ExitProcess");
         _exit(0);
-    case 8:  // CreateThread(out h, entry, arg, sp, prio, core)：单线程模拟，发假句柄不真跑
-        *(uint32_t *)(uintptr_t)x[0] = g_handle_next++;
-        return 0;
+    case 8: x[1] = ++g_handle_next; return 0;   // CreateThread(out h, …)：单线程模拟，不真跑
     case 9:  // StartThread(h)
         return 0;
     case 10: // ExitThread
         LOG("svc#10 ExitThread on main?");
         return 0;
-    case 11: // SleepThread(ns)
-        return 0;
-    case 12: {  // GetThreadPriority(out i32, h) ← 44
-        *(int32_t *)(uintptr_t)x[0] = 44;
-        return 0;
-    }
-    case 13: // SetThreadPriority(h, prio)
-        return 0;
-    case 14: {  // GetThreadCoreMask(out i32, out u64 mask, h)
-        *(int32_t *)(uintptr_t)x[0] = 0;
-        *(uint64_t *)(uintptr_t)x[1] = 1;
+    case 11: {  // SleepThread(ns)：真睡，避免轮询空转烧看门狗
+        uint64_t ns = x[0];
+        struct timespec ts = { (time_t)(ns / 1000000000), (long)(ns % 1000000000) };
+        nanosleep(&ts, NULL);
         return 0;
     }
-    case 15: // SetThreadCoreMask
-        return 0;
-    case 16: // GetCurrentProcessorNumber
-        return 0;
-    case 22: // CloseHandle
-        return 0;
-    case 24: {  // WaitSynchronization(out idx, handles, n, timeout)：恒满足
-        if (x[0]) *(int32_t *)(uintptr_t)x[0] = 0;
-        return 0;
-    }
-    case 25: // CancelSynchronization
-        return 0;
-    case 26: // ArbitrateLock
-    case 27: // ArbitrateUnlock
-    case 28: // WaitProcessWideKeyAtomic
-    case 29: // SignalProcessWideKey
-        return 0;
-    case 30: // GetSystemTick（19.2 MHz）
-        return now_ns() * 12 / 625;
-    case 31: {  // ConnectToNamedPort(out h, name)
+    case 12: x[1] = 44; return 0;            // GetThreadPriority(out i32, h) → w1
+    case 13: return 0;                        // SetThreadPriority
+    case 14: x[1] = 0; x[2] = 7; return 0;   // GetThreadCoreMask(out i32, out u64, h) → w1=core x2=mask
+    case 15: return 0;                        // SetThreadCoreMask
+    case 16: return 0;                        // GetCurrentProcessorNumber
+    case 17: case 18: case 23: return 0;     // SignalEvent / ClearEvent / ResetSignal
+    case 21: x[1] = ++g_handle_next; return 0;   // CreateTransferMemory(out h) → w1
+    case 22: return 0;                        // CloseHandle
+    case 24: x[1] = 0; return 0;             // WaitSynchronization(out idx, …) → w1：恒满足
+    case 25: return 0;                        // CancelSynchronization
+    case 26: case 27: case 28: case 29: return 0;   // ArbitrateLock/Unlock、Wait/SignalProcessWideKey
+    case 30: return now_ns() * 12 / 625;     // GetSystemTick（19.2 MHz）
+    case 31: {  // ConnectToNamedPort(out h, name) → w1
         char nm[64] = {0};
         for (int i = 0; i < 63; i++) {
             uint8_t c = *(const uint8_t *)(uintptr_t)(x[1] + i);
@@ -215,9 +252,12 @@ static uint64_t svc_impl(int num, uint64_t *x) {
             nm[i] = (char)c;
         }
         LOG("svc#31 ConnectToNamedPort → %s", nm);
-        *(uint32_t *)(uintptr_t)x[0] = g_handle_next++;
+        x[1] = ++g_handle_next;
         return 0;
     }
+    case 33: LOG("svc#33 SendSyncRequest h=%#llx（IPC 未接管）", (unsigned long long)x[0]); return 0xF601;
+    case 36: x[1] = 0x50; return 0;                   // GetProcessId(out u64, h) → x1
+    case 37: x[1] = 0x60 + g_handle_next; return 0;   // GetThreadId(out u64, h) → x1
     case 38: {  // Break(reason, addr, size)：Debug 断点继续，致命断点退出
         uint64_t reason = x[0];
         LOG("svc#38 Break reason=%#llx addr=%#llx size=%#llx", (unsigned long long)reason,
@@ -234,44 +274,36 @@ static uint64_t svc_impl(int num, uint64_t *x) {
         LOG("客体调试串: %s", buf);
         return 0;
     }
-    case 36: {  // GetProcessId(out u64, h)
-        *(uint64_t *)(uintptr_t)x[0] = 0x50;
-        return 0;
-    }
-    case 37: {  // GetThreadId(out u64, h)
-        *(uint64_t *)(uintptr_t)x[0] = 0x60 + g_handle_next;
-        return 0;
-    }
-    case 41: {  // GetInfo(out u64, InfoType, handle, key)：老固件编号，语义按调用方符号实证
+    case 40: return 0;   // ReturnFromException
+    case 41: {  // GetInfo(InfoType, handle, key) → x1 = 值（包装函数存回 out 指针）
         mem_init();
-        uint64_t t = x[1], key = x[3], v = 0;
+        uint64_t t = x[1], v = 0;
         switch (t) {
-        case 12: v = (uint64_t)g_as; break;                    // 地址空间起点（Aslr/OsResourceManager）
-        case 13: v = (uint64_t)g_as + RESERVE; break;          // 地址空间终点
-        case 14: v = 0; break;                                  // 栈守卫起点
-        case 15: v = 0x8000000ull; break;                       // 栈守卫终点
-        case 2:                                                 // VAMM 保留区起点（AddressRegionManager 启动问法）
-        case 11:                                                // VAMM 保留区（GetReservedRegionImpl，key 2/3）
-            v = (uint64_t)g_alias; break;
-        case 3:
-            v = (uint64_t)g_alias + 0x20000000; break;          // 保留区终点
-        case 16: v = 1; break;                                  // 虚拟地址内存启用（MapPhysicalMemory 走 alias 区）
-        case 17: v = 0; break;                                  // VAMM 资源用量
-        case 8:  v = 0; break;                                  // 无调试器
-        case 10: v = 0; break;                                  // 空闲拍数
-        case 7:  v = 0xE0000000ull; break;                      // 总内存（QueryMemoryInfo 总量格）
-        case 6:  v = 0x1000000ull; break;                       // 已用内存
-        default: LOG("svc#41 GetInfo type=%llu key=%#llx → 0", (unsigned long long)t, (unsigned long long)key); v = 0; break;
+        case 0:  v = 7; break;                      // CoreMask：3 个应用核
+        case 1:  v = 0x3f; break;                   // PriorityMask
+        case 2:  v = (uint64_t)g_alias; break;      // AliasRegionAddress（GetReservedRegionImpl，sdk+0x8cae0 实证）
+        case 3:  v = ALIAS_CAP; break;              // AliasRegionSize
+        case 4:  v = (uint64_t)g_heap; break;       // HeapRegionAddress
+        case 5:  v = HEAP_CAP; break;               // HeapRegionSize
+        case 6:  v = 0x100000000ull; break;         // TotalMemoryAvailable
+        case 7:  v = image_bytes() + g_heap_cur; break;   // TotalMemoryUsage
+        case 11: v = now_ns() ^ (uint64_t)(uintptr_t)&t; break;   // RandomEntropy（RngManager 播种）
+        case 12: v = (uint64_t)g_as; break;         // AslrRegionAddress（OsResourceManager 实证）
+        case 13: v = RESERVE; break;                // AslrRegionSize
+        case 14: v = (uint64_t)g_stack; break;      // StackRegionAddress
+        case 15: v = STACK_CAP; break;              // StackRegionSize
+        case 16: v = 1; break;                      // IsVirtualAddressMemoryEnabled（InitializeIfEnabled 实证）
+        default: LOG("svc#41 GetInfo type=%llu → 0", (unsigned long long)t); break;
         }
-        (void)key;
-        *(uint64_t *)(uintptr_t)x[0] = v;
+        x[1] = v;
         return 0;
     }
+    case 42: case 43: return 0;   // FlushEntireDataCache / FlushDataCache
     case 44: {  // MapPhysicalMemory(addr, size)：只许在 alias 区内（d2r 配方：mprotect 提交）
         mem_init();
         uint8_t *a = (uint8_t *)(uintptr_t)x[0];
         size_t size = (size_t)x[1];
-        if (a < g_alias || a + size > g_alias + 0x20000000) {
+        if (a < g_alias || a + size > g_alias + ALIAS_CAP) {
             LOG("svc#44 MapPhysicalMemory 越出 alias 区：%p+%#zx", a, size);
             return 0xD401;
         }
@@ -282,23 +314,22 @@ static uint64_t svc_impl(int num, uint64_t *x) {
         mem_init();
         uint8_t *a = (uint8_t *)(uintptr_t)x[0];
         size_t size = (size_t)x[1];
-        if (a < g_alias || a + size > g_alias + 0x20000000) return 0xD401;
+        if (a < g_alias || a + size > g_alias + ALIAS_CAP) return 0xD401;
         madvise(a, size, MADV_FREE);
         if (mprotect(a, size, PROT_NONE)) die("svc#45 mprotect");
         return 0;
     }
-    case 48: {  // GetResourceLimitLimitValue(out i64, h, resource)
-        *(int64_t *)(uintptr_t)x[0] = 0x100000000ll;
-        return 0;
-    }
-    case 49: {  // GetResourceLimitCurrentValue(out i64, h, resource)
-        *(int64_t *)(uintptr_t)x[0] = 0x8000000ll;
-        return 0;
-    }
-    case 51: {  // GetThreadContext3(out ThreadContext 0x328, h)
+    case 47: x[1] = x[2] = x[3] = 0; return 0;   // GetLastThreadInfo（x1..x3 三寄存器）
+    case 48: x[1] = 0x100000000ull; return 0;              // GetResourceLimitLimitValue → x1
+    case 49: x[1] = image_bytes() + g_heap_cur; return 0;  // GetResourceLimitCurrentValue → x1
+    case 51: {  // GetThreadContext3(out ThreadContext 0x328, h)：结构体写指针（包装无寄存器存回）
         memset((void *)(uintptr_t)x[0], 0, 0x328);
         return 0;
     }
+    case 60: return 0;   // DumpInfo
+    case 64: x[1] = ++g_handle_next; x[2] = ++g_handle_next; return 0;   // CreateSession → w1 w2
+    case 69: x[1] = ++g_handle_next; x[2] = ++g_handle_next; return 0;   // CreateEvent → w1 w2
+    case 83: x[1] = ++g_handle_next; return 0;   // CreateInterruptEvent → w1
     default:
         return 0xF001;
     }
@@ -341,7 +372,7 @@ typedef void (*hle_fn0)(void);
 static void h_noop(void) {}
 static void h_excstack(uint64_t *out) {
     mem_init();
-    uint8_t *es = g_stack + 0x80000;
+    uint8_t *es = g_stack + STACK_CAP - 0x8000;   // 栈区顶段：线程栈自底向上分配，互不冲突
     if (mprotect(es, 0x4000, PROT_READ | PROT_WRITE)) die("异常栈 mprotect");
     out[0] = (uint64_t)(es + 0x4000);   // Horizon 习惯：报向下生长的栈顶
     out[1] = 0x4000;
