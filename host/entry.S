@@ -6,7 +6,7 @@
     .p2align 3
 _unimpl_stubs:
     .set k, 0
-    .rept 1024                // 与 dmhost.c MAX_STUB 一致
+    .rept 2048                // 与 dmhost.c MAX_STUB 一致
     movz x9, #k
     b _unimpl_entry
     .set k, k + 1
