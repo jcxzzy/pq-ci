@@ -764,6 +764,11 @@ static void *h_nvn_bootstrap(const char *name) {
     g_stub_name[g_nstub] = strdup(name);
     return &unimpl_stubs[g_nstub++];
 }
+// oe 查询（服务对象因 Initialize 接管为空，直查会空表解引用）：掌机模式 + 正常性能 + 已聚焦
+static uint32_t h_oe_handheld(void) { return 1; }   // GetOperationMode：1=Handheld（触屏取向）
+static uint32_t h_oe_normal(void) { return 0; }     // GetPerformanceMode：0=Normal
+static uint32_t h_oe_focused(void) { return 1; }    // GetCurrentFocusState：1=InFocus
+static uint32_t h_oe_lang(uint8_t *out) { if (out) *out = 1; return 0; }   // GetDesiredLanguage：1=English（语言码表后续接宿主）
 typedef struct { const char *name; hle_fn0 fn; } hle_ent;
 static hle_fn0 force_lookup(const char *name) {
     // nnMain 开局序（main+0xbfdcdc 反汇编实证）：time::Initialize(+0x74) 连 sm IPC、
@@ -794,6 +799,10 @@ static hle_fn0 force_lookup(const char *name) {
         {"_ZN2nn2oe44SetPerformanceModeChangedNotificationEnabledEb", h_noop},
         {"_ZN2nn2oe42SetOperationModeChangedNotificationEnabledEb", h_noop},
         {"_ZN2nn2oe25TryPopNotificationMessageEPj", h_noop},   // 返回 0：nnMain+0x78c tbz w0,#0 → 跳过读消息
+        {"_ZN2nn2oe16GetOperationModeEv", (hle_fn0)h_oe_handheld},
+        {"_ZN2nn2oe18GetPerformanceModeEv", (hle_fn0)h_oe_normal},
+        {"_ZN2nn2oe20GetCurrentFocusStateEv", (hle_fn0)h_oe_focused},
+        {"_ZN2nn2oe18GetDesiredLanguageEv", (hle_fn0)h_oe_lang},
         {"_ZN2nn4diag6detail9AbortImplEPKcS3_S3_iPKNS_6ResultEPKNS_2os17UserExceptionInfoES3_z", (hle_fn0)h_abortimpl},
         {"_ZN2nn4diag6detail9AbortImplEPKcS3_S3_iS3_z", (hle_fn0)h_abortimpl},
         {"_ZN2nn4diag6detail18OnAssertionFailureENS0_13AssertionTypeEPKcS4_S4_i", (hle_fn0)h_assertfail},
