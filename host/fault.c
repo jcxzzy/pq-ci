@@ -56,6 +56,15 @@ static void watchdog(int sig) {
     _exit(71);
 }
 
+static void on_host_exit(int code, void *unused) {
+    (void)unused;
+    fprintf(stderr, "[dm] 进程退出 code=%d（最近svc#%d）\n", code, g_last_svc);
+}
+static void on_abort(int sig) {
+    fprintf(stderr, "[dm] HOST SIGABRT/SIGTRAP sig=%d（最近svc#%d）\n", sig, g_last_svc);
+    _exit(88);
+}
+
 void diag_install(void) {
     struct sigaction sa = {0};
     sa.sa_sigaction = fault_dump;
@@ -63,7 +72,13 @@ void diag_install(void) {
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGBUS, &sa, NULL);
     sigaction(SIGILL, &sa, NULL);
+    sigaction(SIGFPE, &sa, NULL);
     struct sigaction sw = {0};
     sw.sa_handler = watchdog;
     sigaction(SIGALRM, &sw, NULL);
+    struct sigaction ab = {0};
+    ab.sa_handler = on_abort;
+    sigaction(SIGABRT, &ab, NULL);
+    sigaction(SIGTRAP, &ab, NULL);
+    on_exit(on_host_exit, NULL);
 }
