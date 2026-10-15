@@ -703,7 +703,7 @@ static uint32_t h_getentrytype(int32_t *out, const char *path) {
     if (host_path(path, hp, sizeof hp) < 0) { LOG("GetEntryType(%s) 未挂载", path); return FS_ENOENT; }
     struct stat st;
     if (stat(hp, &st)) { LOG("GetEntryType(%s) stat 失败 errno=%d", path, errno); return FS_ENOENT; }
-    *out = S_ISDIR(st.st_mode) ? 1 : 2;   // DirectoryEntryType: 1=目录 2=文件
+    *out = S_ISDIR(st.st_mode) ? 1 : 0;   // 本 SDK 的 DirectoryEntryType：1=目录 0=文件（il2cpp GetFileAttributes 映射反汇编实证；2 是非法值会触发断言）
     LOG("GetEntryType(%s) → type=%d", path, *out);
     return 0;
 }
@@ -731,12 +731,12 @@ static uint32_t h_readdirectory(int64_t *out, void *ents, uint64_t h, int64_t ma
         struct dirent *de = readdir(g_dh[h].d);
         if (!de) break;
         if (de->d_name[0] == '.') continue;
-        int want = (de->d_type == DT_DIR) ? 1 : 2;
+        int want = (de->d_type == DT_DIR) ? 1 : 0;   // 1=目录 0=文件
         if (g_dh[h].mode && !(g_dh[h].mode & want) && g_dh[h].mode != 3) continue;
         uint8_t *slot = e + (size_t)cnt * 0x310;
         memset(slot, 0, 0x310);
         strlcpy((char *)slot, de->d_name, 0x301);
-        *(int32_t *)(slot + 0x304) = want;
+        *(int32_t *)(slot + 0x304) = want;   // 1=目录 0=文件（同 GetEntryType）
         *(int64_t *)(slot + 0x308) = 0;
         struct stat st;
         if (de->d_type != DT_DIR && fstatat(dirfd(g_dh[h].d), de->d_name, &st, 0) == 0)
