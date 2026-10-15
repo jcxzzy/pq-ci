@@ -250,8 +250,12 @@ static uint64_t svc_impl(int num, uint64_t *x) {
         case 13: v = (uint64_t)g_as + RESERVE; break;          // 地址空间终点
         case 14: v = 0; break;                                  // 栈守卫起点
         case 15: v = 0x8000000ull; break;                       // 栈守卫终点
-        case 11: v = 0; break;                                  // VAMM 保留区（key 2/3）：0 = 未启用
-        case 16: v = 0; break;                                  // 虚拟地址内存未启用（避开 MapPhysicalMemory 链）
+        case 2:                                                 // VAMM 保留区起点（AddressRegionManager 启动问法）
+        case 11:                                                // VAMM 保留区（GetReservedRegionImpl，key 2/3）
+            v = (uint64_t)g_alias; break;
+        case 3:
+            v = (uint64_t)g_alias + 0x20000000; break;          // 保留区终点
+        case 16: v = 1; break;                                  // 虚拟地址内存启用（MapPhysicalMemory 走 alias 区）
         case 17: v = 0; break;                                  // VAMM 资源用量
         case 8:  v = 0; break;                                  // 无调试器
         case 10: v = 0; break;                                  // 空闲拍数
@@ -259,7 +263,28 @@ static uint64_t svc_impl(int num, uint64_t *x) {
         case 6:  v = 0x1000000ull; break;                       // 已用内存
         default: LOG("svc#41 GetInfo type=%llu key=%#llx → 0", (unsigned long long)t, (unsigned long long)key); v = 0; break;
         }
+        (void)key;
         *(uint64_t *)(uintptr_t)x[0] = v;
+        return 0;
+    }
+    case 44: {  // MapPhysicalMemory(addr, size)：只许在 alias 区内（d2r 配方：mprotect 提交）
+        mem_init();
+        uint8_t *a = (uint8_t *)(uintptr_t)x[0];
+        size_t size = (size_t)x[1];
+        if (a < g_alias || a + size > g_alias + 0x20000000) {
+            LOG("svc#44 MapPhysicalMemory 越出 alias 区：%p+%#zx", a, size);
+            return 0xD401;
+        }
+        if (mprotect(a, size, PROT_READ | PROT_WRITE)) die("svc#44 mprotect");
+        return 0;
+    }
+    case 45: {  // UnmapPhysicalMemory(addr, size)
+        mem_init();
+        uint8_t *a = (uint8_t *)(uintptr_t)x[0];
+        size_t size = (size_t)x[1];
+        if (a < g_alias || a + size > g_alias + 0x20000000) return 0xD401;
+        madvise(a, size, MADV_FREE);
+        if (mprotect(a, size, PROT_NONE)) die("svc#45 mprotect");
         return 0;
     }
     case 48: {  // GetResourceLimitLimitValue(out i64, h, resource)
