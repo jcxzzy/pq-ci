@@ -308,6 +308,35 @@ void diag_install(void);
 mod_ref_t g_mod_ref[MAX_MOD];
 int g_nmod_ref;
 
+// ---------- 服务层初始化按名接管（d2r-mobile hle_sdkinit.c 配方）----------
+// nninitInitializeSdkModule 调的各服务初始化在真机上连 Horizon 系统服务（IPC），
+// 宿主没有服务进程：接管成空操作，服务接口用到时再逐个接管（hle_fs 等）。
+// 接管函数按客体 ABI 调用（参数在 x0..），与宿主 C ABI 一致。
+typedef void (*hle_fn0)(void);
+static void h_noop(void) {}
+static void h_excstack(uint64_t *out) {
+    mem_init();
+    uint8_t *es = g_stack + 0x80000;
+    if (mprotect(es, 0x4000, PROT_READ | PROT_WRITE)) die("异常栈 mprotect");
+    out[0] = (uint64_t)(es + 0x4000);   // Horizon 习惯：报向下生长的栈顶
+    out[1] = 0x4000;
+    LOG("init 接管：客体异常栈 ← %p+%#x", es, 0x4000);
+}
+typedef struct { const char *name; hle_fn0 fn; } hle_ent;
+static hle_fn0 force_lookup(const char *name) {
+    static const hle_ent tab[] = {
+        {"nndiagStartup", h_noop},
+        {"_ZN2nn2oe10InitializeEv", h_noop},
+        {"_ZN2nn3aoc10InitializeEv", h_noop},
+        {"_ZN2nn4pctl10InitializeEv", h_noop},
+        {"_ZN2nn4diag34InitializeApplicationAbortObserverEv", h_noop},
+        {"nnosGetDefaultUserExceptionStackForApplication", (hle_fn0)h_excstack},
+    };
+    for (unsigned i = 0; i < sizeof tab / sizeof tab[0]; i++)
+        if (!strcmp(tab[i].name, name)) return tab[i].fn;
+    return NULL;
+}
+
 // ---------- 装载 ----------
 static void read_layout(module_t *m, const char *dir) {
     char path[1024]; snprintf(path, sizeof path, "%s/%s.fixups.tsv", dir, m->name);
@@ -396,12 +425,15 @@ static void relocate(module_t *m) {
             unsigned type = ELF64_R_TYPE(r->r_info), si = ELF64_R_SYM(r->r_info);
             if (type == R_AARCH64_RELATIVE) { *where = (uint64_t)m->base + r->r_addend; cnt[0]++; continue; }
             const Elf64_Sym *s = &m->symtab[si];
+            const char *nm = m->strtab + s->st_name;
             uint64_t v;
-            if (s->st_shndx) v = (uint64_t)m->base + s->st_value;
+            hle_fn0 hf = force_lookup(nm);   // HLE_FORCE：接管优先于一切定义
+            if (hf) v = (uint64_t)hf;
+            else if (s->st_shndx) v = (uint64_t)m->base + s->st_value;
             else {
                 void *p = NULL;
-                for (int j = 0; j < g_nmod && !p; j++) p = module_sym(&g_mod[j], m->strtab + s->st_name);
-                v = p ? (uint64_t)p : resolve_import(m, m->strtab + s->st_name);
+                for (int j = 0; j < g_nmod && !p; j++) p = module_sym(&g_mod[j], nm);
+                v = p ? (uint64_t)p : resolve_import(m, nm);
             }
             if (type == R_AARCH64_JUMP_SLOT) { *where = v; cnt[2]++; }
             else { *where = v + r->r_addend; cnt[1]++; }
