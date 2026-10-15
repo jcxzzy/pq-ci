@@ -661,11 +661,13 @@ static uint32_t h_openfile(uint64_t *out, const char *path, int mode) {
     if (host_path(path, hp, sizeof hp) < 0) { LOG("OpenFile 未挂载：%s", path); return FS_ENOENT; }
     int hm = ((mode & 3) == 1) ? O_RDONLY : ((mode & 3) == 2) ? O_WRONLY | O_CREAT : O_RDWR | O_CREAT;
     int fd = open(hp, hm, 0644);
-    if (fd < 0) return FS_ENOENT;   // 只读区里缺文件按未找到回（Unity 会探测可选资源）
+    if (fd < 0) { LOG("OpenFile(%s) mode=%d → errno=%d", path, mode, errno); return FS_ENOENT; }   // 只读区里缺文件按未找到回（Unity 会探测可选资源）
     int h = 1;
     while (h < MAX_FH && g_fh[h]) h++;
     if (h >= MAX_FH) { close(fd); return 0xF701; }
     g_fh[h] = fd;
+    g_fh_pos[h] = 0;
+    LOG("fs Open %s（mode=%d → h=%d）", path, mode, h);
     *out = (uint64_t)h;
     return 0;
 }
@@ -704,12 +706,13 @@ static uint32_t h_opendirectory(uint64_t *out, const char *path, int mode) {
     char hp[1100];
     if (host_path(path, hp, sizeof hp) < 0) return FS_ENOENT;
     DIR *d = opendir(hp);
-    if (!d) return FS_ENOENT;
+    if (!d) { LOG("OpenDirectory(%s) mode=%#x → errno=%d", path, mode, errno); return FS_ENOENT; }
     int h = 1;
     while (h < MAX_DH && g_dh[h].d) h++;
     if (h >= MAX_DH) { closedir(d); return 0xF701; }
     g_dh[h] = (typeof(g_dh[0])){d, mode, {0}};
     strlcpy(g_dh[h].path, hp, sizeof g_dh[0].path);
+    LOG("fs OpenDir %s（mode=%#x → h=%d）", path, mode, h);
     *out = (uint64_t)h;
     return 0;
 }
