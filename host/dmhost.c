@@ -51,7 +51,7 @@ static pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
 extern void dm_gate(void);          // entry.S
 
 // ---------- 未实现导入：记名桩（entry.S 静态桩表）----------
-#define MAX_STUB 1024
+#define MAX_STUB 2048
 static unsigned g_nstub;
 static const char *g_stub_name[MAX_STUB];
 static uint8_t g_stub_seen[MAX_STUB];
@@ -740,6 +740,19 @@ static uint32_t h_vi_opendefault(void **out) {   // 假 Display 句柄：Unity �
     if (out) *out = (void *)(uintptr_t)0x55490001;
     return 0;
 }
+// ---------- NVN 接口层（d2r hle_nvn.c 的最小起点） ----------
+// main 只导入 nvnBootstrapLoader 一个 nvn 符号——NVN 全 API 按名字经它取函数指针，
+// 强制接管后 sdk 里的 NVN 驱动栈整块不执行。第一步每个名字发「记名桩」：
+// 回 0 恰是 NVN_SUCCESS（设备/队列/窗口初始化族天然通过），首次调用记名——
+// 在 runner 上收集 Unity 实际调用的 NVN 面，再按 d2r 的语义分层逐个实装。
+static void *h_nvn_bootstrap(const char *name) {
+    if (!name || !*name) return NULL;
+    for (unsigned k = 0; k < g_nstub; k++)
+        if (g_stub_name[k] && !strcmp(g_stub_name[k], name)) return &unimpl_stubs[k];
+    if (g_nstub >= MAX_STUB) die("nvn 桩表满");
+    g_stub_name[g_nstub] = strdup(name);
+    return &unimpl_stubs[g_nstub++];
+}
 typedef struct { const char *name; hle_fn0 fn; } hle_ent;
 static hle_fn0 force_lookup(const char *name) {
     // nnMain 开局序（main+0xbfdcdc 反汇编实证）：time::Initialize(+0x74) 连 sm IPC、
@@ -761,6 +774,7 @@ static hle_fn0 force_lookup(const char *name) {
         {"_ZN2nn4nifm10InitializeEv", h_noop},   // 网络接口服务：Unity 启动必查；连接类接口后续按需接管
         {"_ZN2nn6socket10InitializeEPvmmi", h_noop},   // BSD 套接字层（在线功能；离线跑通为要）
         {"_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE", (hle_fn0)h_vi_opendefault},   // 假 Display；vi 其余接口走命名桩
+        {"nvnBootstrapLoader", (hle_fn0)h_nvn_bootstrap},   // NVN 全接口经此按名取函数指针；记名桩收集调用面
         {"_ZN2nn2fs22GetGlobalAccessLogModeEPj", (hle_fn0)h_logmode},
         {"_ZN2nn2fs22QueryMountRomCacheSizeEPm", (hle_fn0)h_romcache},
         {"_ZN2nn2fs8MountRomEPKcPvm", (hle_fn0)h_mountrom},
