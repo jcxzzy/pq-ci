@@ -836,11 +836,99 @@ static uint32_t n_queue_finalize(void *q) { LOG("nvn QueueFinalize %p", q); *(ui
 static uint32_t n_queue_geterror(void *q, void *info) { (void)q; if (info) memset(info, 0, 0x18); return 0; }
 static uint32_t n_queue_flush(void *q) { (void)q; return 0; }
 static uint32_t n_queue_finish(void *q) { (void)q; return 0; }
-// —— 窗口 / 同步 / 命令缓冲 / 内存池：先给「成功 + 最小对象」
-static uint32_t n_win_init(void *w, const void *b) { memset(w, 0, 0x40); *(uint32_t *)w = NVN_MAGIC('W', 'I', 'N', '0'); (void)b; LOG("nvn WindowInitialize %p", w); return 1; }
-static uint32_t n_sync_init(void *s, void *dev, uint32_t flags) { memset(s, 0, 0x20); *(uint32_t *)s = NVN_MAGIC('S', 'Y', 'N', 'C'); (void)dev; LOG("nvn SyncInitialize %p flags=%#x", s, flags); return 1; }
+static uint32_t n_queue_totalmem(void *q) { (void)q; return 0; }   // QueueGetTotal*MemoryUsed
+static uint32_t n_queue_resetcounts(void *q) { (void)q; return 0; }
+// —— 内存池（builder 布局自定：dev@0 flags@8 mem@16 size@24；对象：magic@0 flags@8 mem@16 size@24）
+static uint32_t n_pb_setdefaults(void *b) { memset(b, 0, 0x20); return 0; }
+static uint32_t n_pb_setdevice(void *b, void *d) { *(void **)b = d; return 0; }
+static uint32_t n_pb_setflags(void *b, uint32_t f) { *(uint32_t *)((uint8_t *)b + 8) = f; return 0; }
+static uint32_t n_pb_setstorage(void *b, void *mem, uint64_t size) {
+    *(void **)((uint8_t *)b + 16) = mem;
+    *(uint64_t *)((uint8_t *)b + 24) = size;
+    return 0;
+}
+static uint32_t n_pb_getflags(const void *b) { return *(const uint32_t *)((const uint8_t *)b + 8); }
+static void *n_pb_getmemory(const void *b) { return *(void *const *)((const uint8_t *)b + 16); }
+static uint64_t n_pb_getsize(const void *b) { return *(const uint64_t *)((const uint8_t *)b + 24); }
+static uint32_t n_pool_init2(void *p, const void *b) {
+    memset(p, 0, 0x20);
+    *(uint32_t *)p = NVN_MAGIC('P', 'O', 'O', 'L');
+    *(uint32_t *)((uint8_t *)p + 8) = *(const uint32_t *)((const uint8_t *)b + 8);
+    *(void **)((uint8_t *)p + 16) = *(void *const *)((const uint8_t *)b + 16);
+    *(uint64_t *)((uint8_t *)p + 24) = *(const uint64_t *)((const uint8_t *)b + 24);
+    LOG("nvn MemoryPoolInitialize %p mem=%p size=%#llx", p,
+        *(void *const *)((const uint8_t *)b + 16), (unsigned long long)*(const uint64_t *)((const uint8_t *)b + 24));
+    return 1;
+}
+static uint32_t n_pool_finalize(void *p) { *(uint32_t *)p = 0; return 0; }
+static void *n_pool_map(void *p) { return *(void **)((uint8_t *)p + 16); }   // GPU 地址 = CPU 地址（d2r 模型）
+static uint64_t n_pool_getsize(void *p) { return *(uint64_t *)((uint8_t *)p + 24); }
+static uint32_t n_pool_getflags(void *p) { return *(uint32_t *)((uint8_t *)p + 8); }
+static void *n_pool_bufaddr(void *p) { return *(void **)((uint8_t *)p + 16); }
+static uint32_t n_pool_nop2(void *a, uint64_t b) { (void)a; (void)b; return 0; }   // Flush/InvalidateMappedRange
+static uint32_t n_pool_label(void *a, const char *s) { (void)a; (void)s; return 0; }
+// —— 窗口（builder：dev@0 nw@8 interval@16 texs@24 n@32；对象：magic@0 dev@8 interval@16 nw@24）
+static uint32_t n_wb_setdefaults(void *b) { memset(b, 0, 0x40); return 0; }
+static uint32_t n_wb_setdevice(void *b, void *d) { *(void **)b = d; return 0; }
+static uint32_t n_wb_setnw(void *b, void *nw) { *(void **)((uint8_t *)b + 8) = nw; return 0; }
+static uint32_t n_wb_setinterval(void *b, uint32_t i) { *(uint32_t *)((uint8_t *)b + 16) = i; return 0; }
+static uint32_t n_wb_settextures(void *b, void *const *texs, uint32_t n) {
+    *(void **)((uint8_t *)b + 24) = (void *)texs;
+    *(uint32_t *)((uint8_t *)b + 32) = n;
+    return 0;
+}
+static void *n_wb_getnw(const void *b) { return *(void *const *)((const uint8_t *)b + 8); }
+static uint32_t n_wb_getinterval(const void *b) { return *(const uint32_t *)((const uint8_t *)b + 16); }
+static uint32_t n_win_init2(void *w, const void *b) {
+    memset(w, 0, 0x40);
+    *(uint32_t *)w = NVN_MAGIC('W', 'I', 'N', '0');
+    *(void **)((uint8_t *)w + 8) = *(void *const *)b;
+    *(uint32_t *)((uint8_t *)w + 16) = *(const uint32_t *)((const uint8_t *)b + 16);
+    *(void **)((uint8_t *)w + 24) = *(void *const *)((const uint8_t *)b + 8);
+    LOG("nvn WindowInitialize %p dev=%p nw=%p", w, *(void *const *)b, *(void *const *)((const uint8_t *)b + 8));
+    return 1;
+}
+static uint32_t n_win_finalize(void *w) { *(uint32_t *)w = 0; return 0; }
+static void *n_win_getnw(void *w) { return *(void **)((uint8_t *)w + 24); }
+static uint32_t n_win_interval_get(void *w) { return *(uint32_t *)((uint8_t *)w + 16); }
+static uint32_t n_win_interval_set(void *w, uint32_t i) { *(uint32_t *)((uint8_t *)w + 16) = i; return 0; }
+static uint32_t n_win_crop(void *w, int32_t l, int32_t t, int32_t r, int32_t b2) { (void)w; (void)l; (void)t; (void)r; (void)b2; return 0; }
+static uint32_t n_win_acquire(void *w, void **tex, void *sema) { (void)w; (void)sema; if (tex) *tex = NULL; return 0; }
+static uint32_t n_win_label(void *w, const char *s) { (void)w; (void)s; return 0; }
+// —— 同步等待：立即可通过（引导期没有真 GPU 时序）
+static uint32_t n_sync_wait(void *s, int64_t timeout) { (void)s; (void)timeout; return 1; }
+static uint32_t n_sync_label(void *s, const char *n) { (void)s; (void)n; return 0; }
+static uint32_t n_sync_finalize(void *s) { *(uint32_t *)s = 0; return 0; }
+// —— 命令缓冲内存管理（对象：magic@0 dev@8 memcb@0x10 cbdata@0x18）
+static uint32_t n_cb_setcb(void *c, void *cb) { *(void **)((uint8_t *)c + 0x10) = cb; return 0; }
+static uint32_t n_cb_setcbdata(void *c, void *d) { *(void **)((uint8_t *)c + 0x18) = d; return 0; }
+static void *n_cb_getcb(void *c) { return *(void **)((uint8_t *)c + 0x10); }
+static void *n_cb_getcbdata(void *c) { return *(void **)((uint8_t *)c + 0x18); }
+static uint64_t n_cb_memfree(void *c) { (void)c; return 0x100000; }   // Command/Control Memory Free/Size：给足
+static uint64_t n_cb_memused(void *c) { (void)c; return 0; }
+static uint32_t n_cb_addcmd(void *c, void *m, uint64_t n) { (void)c; (void)m; (void)n; return 0; }
+static uint32_t n_cb_addctl(void *c, void *m, uint64_t n) { (void)c; (void)m; (void)n; return 0; }
+static uint32_t n_cb_setpool(void *c, void *pool, int64_t off) { (void)c; (void)pool; (void)off; return 0; }   // SetTexturePool/SetSamplerPool/SetShaderScratchMemory
+static uint32_t n_cb_fence(void *c, void *s, int f) { (void)c; (void)s; (void)f; return 0; }   // FenceSync/WaitSync
+// —— 贴图/采样器/缓冲描述符池（对象：magic@0 pool@8 off@16 count@24）
+static uint32_t n_tpool_init(void *tp, void *pool, int64_t off, int32_t count) {
+    memset(tp, 0, 0x20);
+    *(uint32_t *)tp = NVN_MAGIC('T', 'P', 'O', 'L');
+    *(void **)((uint8_t *)tp + 8) = pool;
+    *(uint64_t *)((uint8_t *)tp + 16) = (uint64_t)off;
+    *(int32_t *)((uint8_t *)tp + 24) = count;
+    LOG("nvn TexturePool/SamplerPoolInitialize %p pool=%p off=%#llx n=%d", tp, pool, (unsigned long long)off, count);
+    return 1;
+}
+static uint32_t n_tpool_fin(void *tp) { *(uint32_t *)tp = 0; return 0; }
+static void *n_tpool_getpool(void *tp) { return *(void **)((uint8_t *)tp + 8); }
+static uint64_t n_tpool_getoff(void *tp) { return *(uint64_t *)((uint8_t *)tp + 16); }
+static uint32_t n_tpool_getsize(void *tp) { return *(int32_t *)((uint8_t *)tp + 24); }
+static uint32_t n_tpool_register(void *tp, void *a, void *b) { (void)tp; (void)a; (void)b; return 0; }
+static uint32_t n_tpool_label(void *tp, const char *s) { (void)tp; (void)s; return 0; }
+// —— 同步 / 命令缓冲初始化（对象语义见上方注释）
+static uint32_t n_sync_init(void *s, void *dev, uint32_t flags) { memset(s, 0, 0x20); *(uint32_t *)s = NVN_MAGIC('S', 'Y', 'N', 'C'); (void)dev; (void)flags; return 1; }
 static uint32_t n_cb_init(void *c, void *dev) { memset(c, 0, 0x100); *(uint32_t *)c = NVN_MAGIC('C', 'M', 'D', 'B'); *(void **)((uint8_t *)c + 8) = dev; LOG("nvn CommandBufferInitialize %p dev=%p", c, dev); return 1; }
-static uint32_t n_pool_init(void *p, const void *b) { memset(p, 0, 0x40); *(uint32_t *)p = NVN_MAGIC('P', 'O', 'O', 'L'); (void)b; LOG("nvn MemoryPoolInitialize %p", p); return 1; }
 static void *h_nvn_bootstrap(const char *name) {
     if (!name || !*name) return NULL;
     static const struct { const char *nm; void *fn; } known[] = {
@@ -864,10 +952,88 @@ static void *h_nvn_bootstrap(const char *name) {
         {"nvnQueueGetError", (void *)n_queue_geterror},
         {"nvnQueueFlush", (void *)n_queue_flush},
         {"nvnQueueFinish", (void *)n_queue_finish},
-        {"nvnWindowInitialize", (void *)n_win_init},
+        {"nvnQueueGetTotalCommandMemoryUsed", (void *)n_queue_totalmem},
+        {"nvnQueueGetTotalComputeMemoryUsed", (void *)n_queue_totalmem},
+        {"nvnQueueGetTotalControlMemoryUsed", (void *)n_queue_totalmem},
+        {"nvnQueueResetMemoryUsageCounts", (void *)n_queue_resetcounts},
+        // 内存池
+        {"nvnMemoryPoolBuilderSetDefaults", (void *)n_pb_setdefaults},
+        {"nvnMemoryPoolBuilderSetDevice", (void *)n_pb_setdevice},
+        {"nvnMemoryPoolBuilderSetFlags", (void *)n_pb_setflags},
+        {"nvnMemoryPoolBuilderSetStorage", (void *)n_pb_setstorage},
+        {"nvnMemoryPoolBuilderGetFlags", (void *)n_pb_getflags},
+        {"nvnMemoryPoolBuilderGetMemory", (void *)n_pb_getmemory},
+        {"nvnMemoryPoolBuilderGetSize", (void *)n_pb_getsize},
+        {"nvnMemoryPoolInitialize", (void *)n_pool_init2},
+        {"nvnMemoryPoolFinalize", (void *)n_pool_finalize},
+        {"nvnMemoryPoolMap", (void *)n_pool_map},
+        {"nvnMemoryPoolGetSize", (void *)n_pool_getsize},
+        {"nvnMemoryPoolGetFlags", (void *)n_pool_getflags},
+        {"nvnMemoryPoolGetBufferAddress", (void *)n_pool_bufaddr},
+        {"nvnMemoryPoolFlushMappedRange", (void *)n_pool_nop2},
+        {"nvnMemoryPoolInvalidateMappedRange", (void *)n_pool_nop2},
+        {"nvnMemoryPoolSetDebugLabel", (void *)n_pool_label},
+        // 窗口
+        {"nvnWindowBuilderSetDefaults", (void *)n_wb_setdefaults},
+        {"nvnWindowBuilderSetDevice", (void *)n_wb_setdevice},
+        {"nvnWindowBuilderSetNativeWindow", (void *)n_wb_setnw},
+        {"nvnWindowBuilderSetPresentInterval", (void *)n_wb_setinterval},
+        {"nvnWindowBuilderSetTextures", (void *)n_wb_settextures},
+        {"nvnWindowBuilderGetNativeWindow", (void *)n_wb_getnw},
+        {"nvnWindowBuilderGetPresentInterval", (void *)n_wb_getinterval},
+        {"nvnWindowInitialize", (void *)n_win_init2},
+        {"nvnWindowFinalize", (void *)n_win_finalize},
+        {"nvnWindowGetNativeWindow", (void *)n_win_getnw},
+        {"nvnWindowGetPresentInterval", (void *)n_win_interval_get},
+        {"nvnWindowSetPresentInterval", (void *)n_win_interval_set},
+        {"nvnWindowSetCrop", (void *)n_win_crop},
+        {"nvnWindowGetCrop", (void *)n_win_crop},
+        {"nvnWindowAcquireTexture", (void *)n_win_acquire},
+        {"nvnWindowSetDebugLabel", (void *)n_win_label},
+        // 同步
         {"nvnSyncInitialize", (void *)n_sync_init},
+        {"nvnSyncFinalize", (void *)n_sync_finalize},
+        {"nvnSyncWait", (void *)n_sync_wait},
+        {"nvnSyncSetDebugLabel", (void *)n_sync_label},
+        // 命令缓冲
         {"nvnCommandBufferInitialize", (void *)n_cb_init},
-        {"nvnMemoryPoolInitialize", (void *)n_pool_init},
+        {"nvnCommandBufferSetMemoryCallback", (void *)n_cb_setcb},
+        {"nvnCommandBufferSetMemoryCallbackData", (void *)n_cb_setcbdata},
+        {"nvnCommandBufferGetMemoryCallback", (void *)n_cb_getcb},
+        {"nvnCommandBufferGetMemoryCallbackData", (void *)n_cb_getcbdata},
+        {"nvnCommandBufferAddCommandMemory", (void *)n_cb_addcmd},
+        {"nvnCommandBufferAddControlMemory", (void *)n_cb_addctl},
+        {"nvnCommandBufferGetCommandMemoryFree", (void *)n_cb_memfree},
+        {"nvnCommandBufferGetCommandMemorySize", (void *)n_cb_memfree},
+        {"nvnCommandBufferGetCommandMemoryUsed", (void *)n_cb_memused},
+        {"nvnCommandBufferGetControlMemoryFree", (void *)n_cb_memfree},
+        {"nvnCommandBufferGetControlMemorySize", (void *)n_cb_memfree},
+        {"nvnCommandBufferGetControlMemoryUsed", (void *)n_cb_memused},
+        {"nvnCommandBufferSetTexturePool", (void *)n_cb_setpool},
+        {"nvnCommandBufferSetSamplerPool", (void *)n_cb_setpool},
+        {"nvnCommandBufferSetShaderScratchMemory", (void *)n_cb_setpool},
+        {"nvnCommandBufferFenceSync", (void *)n_cb_fence},
+        {"nvnCommandBufferWaitSync", (void *)n_cb_fence},
+        // 描述符池
+        {"nvnTexturePoolInitialize", (void *)n_tpool_init},
+        {"nvnSamplerPoolInitialize", (void *)n_tpool_init},
+        {"nvnTexturePoolFinalize", (void *)n_tpool_fin},
+        {"nvnSamplerPoolFinalize", (void *)n_tpool_fin},
+        {"nvnTexturePoolGetMemoryPool", (void *)n_tpool_getpool},
+        {"nvnSamplerPoolGetMemoryPool", (void *)n_tpool_getpool},
+        {"nvnTexturePoolGetMemoryOffset", (void *)n_tpool_getoff},
+        {"nvnSamplerPoolGetMemoryOffset", (void *)n_tpool_getoff},
+        {"nvnTexturePoolGetSize", (void *)n_tpool_getsize},
+        {"nvnSamplerPoolGetSize", (void *)n_tpool_getsize},
+        {"nvnTexturePoolRegisterTexture", (void *)n_tpool_register},
+        {"nvnTexturePoolRegisterImage", (void *)n_tpool_register},
+        {"nvnSamplerPoolRegisterSampler", (void *)n_tpool_register},
+        {"nvnSamplerPoolRegisterSamplerBuilder", (void *)n_tpool_register},
+        {"nvnTexturePoolSetDebugLabel", (void *)n_tpool_label},
+        {"nvnSamplerPoolSetDebugLabel", (void *)n_tpool_label},
+        // 队列-同步
+        {"nvnQueueFenceSync", (void *)n_cb_fence},
+        {"nvnQueueWaitSync", (void *)n_cb_fence},
     };
     for (unsigned i = 0; i < sizeof known / sizeof known[0]; i++)
         if (!strcmp(known[i].nm, name)) return known[i].fn;
