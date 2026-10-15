@@ -12,6 +12,7 @@ typedef struct { char name[16]; uint8_t *base; size_t size; } mod_ref_t;
 extern mod_ref_t g_mod_ref[8];
 extern int g_nmod_ref;
 extern int g_last_svc;
+extern uint64_t g_guest_lo, g_guest_hi;   // dmhost 预留块区间（客体堆在内）
 
 static void where_of(uint64_t a, char *out, size_t n) {
     for (int j = 0; j < g_nmod_ref; j++) {
@@ -40,12 +41,20 @@ static void fault_dump(int sig, siginfo_t *si, void *uc_) {
     uint64_t sp = uc->uc_mcontext->__ss.__sp, fp = uc->uc_mcontext->__ss.__fp;
     uint64_t x0 = uc->uc_mcontext->__ss.__x[0], x1 = uc->uc_mcontext->__ss.__x[1];
     uint64_t x2 = uc->uc_mcontext->__ss.__x[2], x3 = uc->uc_mcontext->__ss.__x[3];
+    uint64_t x19 = uc->uc_mcontext->__ss.__x[19], x20 = uc->uc_mcontext->__ss.__x[20];
     char where[64];
     where_of(pc, where, sizeof where);
     fprintf(stderr, "[dm] FAULT sig=%d addr=%p pc=%#llx(%s) lr=%#llx sp=%#llx fp=%#llx x0=%#llx x1=%#llx x2=%#llx x3=%#llx 最近svc#%d\n",
             sig, si->si_addr, (unsigned long long)pc, where, (unsigned long long)lr,
             (unsigned long long)sp, (unsigned long long)fp,
             (unsigned long long)x0, (unsigned long long)x1, (unsigned long long)x2, (unsigned long long)x3, g_last_svc);
+    fprintf(stderr, "[dm]   x19=%#llx x20=%#llx", (unsigned long long)x19, (unsigned long long)x20);
+    if (x19 >= g_guest_lo && x19 < g_guest_hi) {   // 客体堆里的 ctx 对象：直接转储关键字段
+        fprintf(stderr, "  [x19+0x90..0xc0]:");
+        for (int o = 0x90; o <= 0xc0; o += 8)
+            fprintf(stderr, " +%#x:%#llx", o, (unsigned long long)*(uint64_t *)(x19 + o));
+    }
+    fputc('\n', stderr);
     guest_backtrace(fp);
     _exit(70);
 }
