@@ -878,8 +878,8 @@ static void relocate(module_t *m) {
             uint64_t v;
             hle_fn0 hf = force_lookup(nm);   // HLE_FORCE：接管优先于一切定义
             if (hf) v = (uint64_t)hf;
-            else if (!strncmp(nm, "_ZN2nn3hid", 10) || !strncmp(nm, "_ZN2nn5audio", 12))
-                v = resolve_import(m, nm);   // hid/audio 整族先接命名桩：首次命中记名、回 0、不写出参；被用到的查询再逐个实装
+            else if (strcmp(m->name, "sdk") && (!strncmp(nm, "_ZN2nn3hid", 10) || !strncmp(nm, "_ZN2nn5audio", 12)))
+                v = resolve_import(m, nm);   // hid/audio 只对 main/subsdk0 接命名桩（sdk 自身初始化要绑真实现，如 AudioRendererManager 单例构造）；首次命中记名、回 0、不写出参
             else if (s->st_shndx) v = (uint64_t)m->base + s->st_value;
             else {
                 void *p = NULL;
