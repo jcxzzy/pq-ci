@@ -633,6 +633,7 @@ static uint32_t h_assertfail(int type, const char *file, const char *func, const
 static struct { char name[16]; char dir[1024]; } g_mnt[MAX_MNT];
 static int g_nmnt;
 static int g_fh[MAX_FH];            // 宿主 fd（1 基句柄，0 = 空）
+static uint64_t g_fh_pos[MAX_FH];   // 文件位置：ReadFile 传 off=-1 时从当前位置续读并推进
 static struct { DIR *d; int mode; char path[1024]; } g_dh[MAX_DH];
 
 static void rom_mount(const char *name, const char *dir) {
@@ -670,8 +671,12 @@ static uint32_t h_openfile(uint64_t *out, const char *path, int mode) {
 }
 static uint32_t h_readfile_n(uint64_t *out, uint64_t h, int64_t off, void *buf, uint64_t n) {
     if (!h || h >= MAX_FH || !g_fh[h]) return 0xF601;
-    ssize_t r = pread(g_fh[h], buf, n, (off_t)off);
-    if (r < 0) return 0xFA01;
+    uint64_t pos;
+    if (off < 0) { pos = g_fh_pos[h]; }        // -1 = 从当前位置续读（nnSdk 语义）
+    else { pos = (uint64_t)off; g_fh_pos[h] = (uint64_t)off; }
+    ssize_t r = pread(g_fh[h], buf, n, (off_t)pos);
+    if (r < 0) { LOG("ReadFile h=%llu off=%lld n=%llu → errno=%d", (unsigned long long)h, (long long)off, (unsigned long long)n, errno); return 0xFA01; }
+    g_fh_pos[h] = pos + (uint64_t)r;
     if (out) *out = (uint64_t)r;
     return 0;
 }
