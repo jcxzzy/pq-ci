@@ -153,10 +153,9 @@ static uint64_t svc_impl(int num, uint64_t *x) {
         *(int32_t *)(uintptr_t)x[0] = 0;
         return 0;
     }
-    case 41: {  // GetThreadContext3(out)：ThreadContext 恰为 0x328 字节（多清会抹掉调用者栈上的保存 LR）
-        memset((void *)(uintptr_t)x[0], 0, 0x328);
-        return 0;
-    }
+    case 41:  // GetThreadContext3：对当前线程返回错误（0xF401），不写客体内存——
+              // 先验证 41 号门之后的 PC=0 是否与写上下文缓冲有关
+        return 0xF401;
     default:
         return 0xF001;
     }
