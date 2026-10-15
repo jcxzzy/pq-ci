@@ -801,7 +801,7 @@ static uint32_t n_dev_init(void *d, const void *b) {
     LOG("nvn DeviceInitialize %p flags=%#x", d, *(const uint32_t *)b);
     return 1;   // NVNboolean：成功
 }
-static uint32_t n_dev_finalize(void *d) { *(uint32_t *)d = 0; return 0; }
+static uint32_t n_dev_finalize(void *d) { LOG("nvn DeviceFinalize %p", d); *(uint32_t *)d = 0; return 0; }
 static uint32_t n_dev_getint(const void *d, int32_t pname, int32_t *out) {
     (void)d;
     if (out) *out = (pname >= 0 && pname < (int32_t)(sizeof g_nvn_devinfo / sizeof g_nvn_devinfo[0])) ? g_nvn_devinfo[pname] : 0;
@@ -832,15 +832,15 @@ static uint32_t n_queue_init(void *q, const void *b) {
     LOG("nvn QueueInitialize %p dev=%p", q, *(void *const *)b);
     return 1;
 }
-static uint32_t n_queue_finalize(void *q) { *(uint32_t *)q = 0; return 0; }
+static uint32_t n_queue_finalize(void *q) { LOG("nvn QueueFinalize %p", q); *(uint32_t *)q = 0; return 0; }
 static uint32_t n_queue_geterror(void *q, void *info) { (void)q; if (info) memset(info, 0, 0x18); return 0; }
 static uint32_t n_queue_flush(void *q) { (void)q; return 0; }
 static uint32_t n_queue_finish(void *q) { (void)q; return 0; }
 // —— 窗口 / 同步 / 命令缓冲 / 内存池：先给「成功 + 最小对象」
-static uint32_t n_win_init(void *w, const void *b) { memset(w, 0, 0x40); *(uint32_t *)w = NVN_MAGIC('W', 'I', 'N', '0'); (void)b; return 1; }
-static uint32_t n_sync_init(void *s, void *dev, uint32_t flags) { memset(s, 0, 0x20); *(uint32_t *)s = NVN_MAGIC('S', 'Y', 'N', 'C'); (void)dev; (void)flags; return 1; }
-static uint32_t n_cb_init(void *c, void *dev) { memset(c, 0, 0x100); *(uint32_t *)c = NVN_MAGIC('C', 'M', 'D', 'B'); *(void **)((uint8_t *)c + 8) = dev; return 1; }
-static uint32_t n_pool_init(void *p, const void *b) { memset(p, 0, 0x40); *(uint32_t *)p = NVN_MAGIC('P', 'O', 'O', 'L'); (void)b; return 1; }
+static uint32_t n_win_init(void *w, const void *b) { memset(w, 0, 0x40); *(uint32_t *)w = NVN_MAGIC('W', 'I', 'N', '0'); (void)b; LOG("nvn WindowInitialize %p", w); return 1; }
+static uint32_t n_sync_init(void *s, void *dev, uint32_t flags) { memset(s, 0, 0x20); *(uint32_t *)s = NVN_MAGIC('S', 'Y', 'N', 'C'); (void)dev; LOG("nvn SyncInitialize %p flags=%#x", s, flags); return 1; }
+static uint32_t n_cb_init(void *c, void *dev) { memset(c, 0, 0x100); *(uint32_t *)c = NVN_MAGIC('C', 'M', 'D', 'B'); *(void **)((uint8_t *)c + 8) = dev; LOG("nvn CommandBufferInitialize %p dev=%p", c, dev); return 1; }
+static uint32_t n_pool_init(void *p, const void *b) { memset(p, 0, 0x40); *(uint32_t *)p = NVN_MAGIC('P', 'O', 'O', 'L'); (void)b; LOG("nvn MemoryPoolInitialize %p", p); return 1; }
 static void *h_nvn_bootstrap(const char *name) {
     if (!name || !*name) return NULL;
     static const struct { const char *nm; void *fn; } known[] = {
