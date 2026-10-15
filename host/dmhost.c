@@ -162,7 +162,7 @@ static uint64_t svc_impl(int num, uint64_t *x) {
     }
 }
 
-static int g_last_svc = -1;   // 崩溃现场用（fault.c 读取）
+int g_last_svc = -1;   // 崩溃现场用（fault.c 读取）
 
 uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
     for (unsigned i = gate_h(ret_addr);; i = (i + 1) & ((1u << GATE_BITS) - 1)) {
