@@ -1128,6 +1128,24 @@ static uint64_t h_g_vfprintf(void *f, const char *fmt, va_list ap) { (void)f; re
 static uint64_t h_g_fwrite(const void *p, uint64_t sz, uint64_t n, void *f) { (void)f; return (uint64_t)fwrite(p, (size_t)sz, (size_t)n, stderr); }
 static uint64_t h_g_puts(const char *s) { fputs(s ? s : "(null)", stderr); fputc('\n', stderr); return 0; }
 static uint64_t h_g_fflush(void *f) { (void)f; fflush(stderr); return 0; }
+// 客体 FILE 族直通宿主（带 rom:/ 路径映射）——il2cpp os 层的文件读写走客体内存
+// musl 的 fopen，其底层 write/read 在宿主必然失败；全部接到宿主后 FILE* 语义自洽。
+static uint64_t h_g_fopen(const char *path, const char *mode) {
+    char hp[1100];
+    if (path && host_path(path, hp, sizeof hp) >= 0) {
+        FILE *f = fopen(hp, mode);
+        LOG("fopen(%s,%s) → %p", path, mode, f);
+        return (uint64_t)f;
+    }
+    if (path) LOG("fopen(%s) 未挂载 → NULL", path);
+    return 0;
+}
+static uint64_t h_g_fread(void *p, uint64_t sz, uint64_t n, void *f) { return (uint64_t)fread(p, (size_t)sz, (size_t)n, (FILE *)f); }
+static uint64_t h_g_fclose(void *f) { return (uint64_t)fclose((FILE *)f); }
+static uint64_t h_g_fseek(void *f, int64_t off, int whence) { return (uint64_t)fseeko((FILE *)f, (off_t)off, whence); }
+static uint64_t h_g_ftell(void *f) { return (uint64_t)ftello((FILE *)f); }
+static uint64_t h_g_feof(void *f) { return (uint64_t)feof((FILE *)f); }
+static uint64_t h_g_ferror(void *f) { return (uint64_t)ferror((FILE *)f); }
 typedef struct { const char *name; hle_fn0 fn; } hle_ent;
 static hle_fn0 force_lookup(const char *name) {
     // nnMain 开局序（main+0xbfdcdc 反汇编实证）：time::Initialize(+0x74) 连 sm IPC、
@@ -1162,6 +1180,13 @@ static hle_fn0 force_lookup(const char *name) {
         {"fwrite", (hle_fn0)h_g_fwrite},
         {"puts", (hle_fn0)h_g_puts},
         {"fflush", (hle_fn0)h_g_fflush},
+        {"fopen", (hle_fn0)h_g_fopen},
+        {"fread", (hle_fn0)h_g_fread},
+        {"fclose", (hle_fn0)h_g_fclose},
+        {"fseek", (hle_fn0)h_g_fseek},
+        {"ftell", (hle_fn0)h_g_ftell},
+        {"feof", (hle_fn0)h_g_feof},
+        {"ferror", (hle_fn0)h_g_ferror},
         // hid 查询（Unity 已调用）：写出参为零态，避免读到残留栈值
         {"_ZN2nn3hid15GetNpadStyleSetERKj", h_oe_normal},                     // 无手柄样式
         {"_ZN2nn3hid16GetDebugPadStateEPNS0_13DebugPadStateE", (hle_fn0)h_hid_zero8},
