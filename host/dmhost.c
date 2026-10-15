@@ -411,6 +411,11 @@ static hle_fn0 force_lookup(const char *name) {
         {"_ZN2nn2fs22GetGlobalAccessLogModeEPj", (hle_fn0)h_logmode},
         {"_ZN2nn2fs22QueryMountRomCacheSizeEPm", (hle_fn0)h_romcache},
         {"_ZN2nn2fs8MountRomEPKcPvm", (hle_fn0)h_mountrom},
+        // oe 服务对象因 Initialize 接管为空，三个 notification setter 会空表解引用（sdk+0x14f064 实证）
+        {"_ZN2nn2oe28SetResumeNotificationEnabledEb", h_noop},
+        {"_ZN2nn2oe44SetPerformanceModeChangedNotificationEnabledEb", h_noop},
+        {"_ZN2nn2oe42SetOperationModeChangedNotificationEnabledEb", h_noop},
+        {"_ZN2nn2oe25TryPopNotificationMessageEPj", h_noop},   // 返回 0：nnMain+0x78c tbz w0,#0 → 跳过读消息
     };
     for (unsigned i = 0; i < sizeof tab / sizeof tab[0]; i++)
         if (!strcmp(tab[i].name, name)) return tab[i].fn;
