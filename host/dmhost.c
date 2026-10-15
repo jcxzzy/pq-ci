@@ -768,19 +768,106 @@ static uint32_t h_vi_getnativewindow(void **out, void *layer) {   // 假 native 
 }
 // ---------- NVN 接口层（d2r hle_nvn.c 的最小起点） ----------
 // main 只导入 nvnBootstrapLoader 一个 nvn 符号——NVN 全 API 按名字经它取函数指针，
-// 强制接管后 sdk 里的 NVN 驱动栈整块不执行。第一步每个名字发「记名桩」：
-// 回 0 恰是 NVN_SUCCESS（设备/队列/窗口初始化族天然通过），首次调用记名——
-// 在 runner 上收集 Unity 实际调用的 NVN 面，再按 d2r 的语义分层逐个实装。
+// 强制接管后 sdk 里的 NVN 驱动栈整块不执行。
+// 关键语义：NVN 的 Initialize 族返回 NVNboolean（1=成功）而非 Result 0——
+// 纯 0 桩会让 Unity 判定初始化失败走清理路径（对齐分配配普通 delete，真机上不执行的死代码）。
+// 对象按 d2r nvn_obj.h 的最小布局就地写进游戏分配的内存（magic + 设备指针等）。
+#define NVN_MAGIC(a, b, c, d) ((uint32_t)(a) | (uint32_t)(b) << 8 | (uint32_t)(c) << 16 | (uint32_t)(d) << 24)
 static void *h_nvn_bootstrap(const char *name);
 static void *h_nvn_getprocaddr(void *dev, const char *name) {
     void *fn = h_nvn_bootstrap(name);
     LOG("nvnDeviceGetProcAddress(%s) → %p", name && (uintptr_t)name > 0x10000 ? name : "?", fn);
     return fn;
 }
+// 设备属性表：Tegra X1 实测值（照抄 d2r，nvn_DeviceConstantsNX.h 逐项实测）
+static const int g_nvn_devinfo[0x4E] = {
+    [0x00] = 53, [0x01] = 311, [0x02] = 14, [0x03] = 65536, [0x04] = 256, [0x05] = 8, [0x06] = 16, [0x07] = 4, [0x08] = 16, [0x09] = 32,
+    [0x0A] = 16, [0x0B] = 4, [0x0C] = 4, [0x0D] = 4, [0x0E] = 16, [0x0F] = 32, [0x10] = 32, [0x11] = 256, [0x12] = 256,
+    [0x13] = 4, [0x14] = 8, [0x15] = 512, [0x16] = 256, [0x17] = 2, [0x18] = 256, [0x19] = 4096, [0x1A] = 131072,
+    [0x1B] = 16, [0x1C] = 1536, [0x1D] = 1024, [0x1E] = 64, [0x1F] = 1536, [0x20] = 65535, [0x21] = 65535, [0x22] = 65535,
+    [0x23] = 8, [0x24] = 1048576, [0x25] = 4096, [0x26] = 16, [0x27] = 4096, [0x28] = 1, [0x29] = 1, [0x2A] = 1,
+    [0x2B] = 262144, [0x2C] = 15, [0x2D] = 2048, [0x2E] = 1, [0x2F] = 1, [0x30] = 14, [0x31] = 5, [0x32] = 1, [0x33] = 8,
+    [0x34] = 8, [0x35] = 4, [0x36] = 32, [0x37] = 128, [0x38] = 32, [0x39] = 128, [0x3A] = 65536, [0x3B] = 1, [0x3C] = 4,
+    [0x3D] = 16384, [0x3E] = 134217728, [0x3F] = 2048, [0x40] = 16384, [0x41] = 16384, [0x42] = 1, [0x43] = 1, [0x44] = 1,
+    [0x45] = 1, [0x46] = 5, [0x47] = 1, [0x48] = 1, [0x49] = 1, [0x4A] = 1, [0x4B] = 1, [0x4C] = 1, [0x4D] = 16,
+};
+// —— 设备（dev_t：magic/flags @0，其余按需扩）
+static uint32_t n_dev_setdefaults(void *b) { memset(b, 0, 0x20); return 0; }
+static uint32_t n_dev_setflags(void *b, uint32_t f) { *(uint32_t *)b = f; return 0; }
+static uint32_t n_dev_init(void *d, const void *b) {
+    memset(d, 0, 0x20);
+    *(uint32_t *)d = NVN_MAGIC('D', 'E', 'V', '0');
+    ((uint32_t *)d)[1] = *(const uint32_t *)b;
+    LOG("nvn DeviceInitialize %p flags=%#x", d, *(const uint32_t *)b);
+    return 1;   // NVNboolean：成功
+}
+static uint32_t n_dev_finalize(void *d) { *(uint32_t *)d = 0; return 0; }
+static uint32_t n_dev_getint(const void *d, int32_t pname, int32_t *out) {
+    (void)d;
+    if (out) *out = (pname >= 0 && pname < (int32_t)(sizeof g_nvn_devinfo / sizeof g_nvn_devinfo[0])) ? g_nvn_devinfo[pname] : 0;
+    return 0;   // void 返回
+}
+// —— 队列（queue_builder_t：dev@0 flags@8 cmd@16 comp@24 ctl@32 flush@40 mem@48 memsz@56）
+static uint32_t n_qb_setdevice(void *b, void *d) { *(void **)b = d; return 0; }
+static uint32_t n_qb_setdefaults(void *b) { memset(b, 0, 0x40); return 0; }
+static uint32_t n_qb_setflags(void *b, uint32_t f) { *(uint32_t *)((uint8_t *)b + 8) = f; return 0; }
+static uint32_t n_qb_setcmdsz(void *b, uint64_t n) { *(uint64_t *)((uint8_t *)b + 16) = n; return 0; }
+static uint32_t n_qb_setcompsz(void *b, uint64_t n) { *(uint64_t *)((uint8_t *)b + 24) = n; return 0; }
+static uint32_t n_qb_setctlsz(void *b, uint64_t n) { *(uint64_t *)((uint8_t *)b + 32) = n; return 0; }
+static uint32_t n_qb_setflush(void *b, uint64_t n) { *(uint64_t *)((uint8_t *)b + 40) = n; return 0; }
+static uint64_t n_qb_getmemsize(const void *b) {
+    const uint8_t *p = b;
+    uint64_t cmd = *(const uint64_t *)(p + 16), comp = *(const uint64_t *)(p + 24), ctl = *(const uint64_t *)(p + 32);
+    return (cmd + comp + ctl + 4095) & ~(uint64_t)4095;
+}
+static uint32_t n_qb_setmem(void *b, void *m, uint64_t n) {
+    *(void **)((uint8_t *)b + 48) = m;
+    *(uint64_t *)((uint8_t *)b + 56) = n;
+    return 0;
+}
+static uint32_t n_queue_init(void *q, const void *b) {
+    memset(q, 0, 0x40);
+    *(uint32_t *)q = NVN_MAGIC('Q', 'U', 'E', 'U');
+    *(void **)((uint8_t *)q + 8) = *(void *const *)b;   // dev
+    LOG("nvn QueueInitialize %p dev=%p", q, *(void *const *)b);
+    return 1;
+}
+static uint32_t n_queue_finalize(void *q) { *(uint32_t *)q = 0; return 0; }
+static uint32_t n_queue_geterror(void *q, void *info) { (void)q; if (info) memset(info, 0, 0x18); return 0; }
+static uint32_t n_queue_flush(void *q) { (void)q; return 0; }
+static uint32_t n_queue_finish(void *q) { (void)q; return 0; }
+// —— 窗口 / 同步 / 命令缓冲 / 内存池：先给「成功 + 最小对象」
+static uint32_t n_win_init(void *w, const void *b) { memset(w, 0, 0x40); *(uint32_t *)w = NVN_MAGIC('W', 'I', 'N', '0'); (void)b; return 1; }
+static uint32_t n_sync_init(void *s, void *dev, uint32_t flags) { memset(s, 0, 0x20); *(uint32_t *)s = NVN_MAGIC('S', 'Y', 'N', 'C'); (void)dev; (void)flags; return 1; }
+static uint32_t n_cb_init(void *c, void *dev) { memset(c, 0, 0x100); *(uint32_t *)c = NVN_MAGIC('C', 'M', 'D', 'B'); *(void **)((uint8_t *)c + 8) = dev; return 1; }
+static uint32_t n_pool_init(void *p, const void *b) { memset(p, 0, 0x40); *(uint32_t *)p = NVN_MAGIC('P', 'O', 'O', 'L'); (void)b; return 1; }
 static void *h_nvn_bootstrap(const char *name) {
     if (!name || !*name) return NULL;
     static const struct { const char *nm; void *fn; } known[] = {
         {"nvnDeviceGetProcAddress", (void *)h_nvn_getprocaddr},
+        {"nvnDeviceBuilderSetDefaults", (void *)n_dev_setdefaults},
+        {"nvnDeviceBuilderSetFlags", (void *)n_dev_setflags},
+        {"nvnDeviceInitialize", (void *)n_dev_init},
+        {"nvnDeviceFinalize", (void *)n_dev_finalize},
+        {"nvnDeviceGetInteger", (void *)n_dev_getint},
+        {"nvnQueueBuilderSetDevice", (void *)n_qb_setdevice},
+        {"nvnQueueBuilderSetDefaults", (void *)n_qb_setdefaults},
+        {"nvnQueueBuilderSetFlags", (void *)n_qb_setflags},
+        {"nvnQueueBuilderSetCommandMemorySize", (void *)n_qb_setcmdsz},
+        {"nvnQueueBuilderSetComputeMemorySize", (void *)n_qb_setcompsz},
+        {"nvnQueueBuilderSetControlMemorySize", (void *)n_qb_setctlsz},
+        {"nvnQueueBuilderSetCommandFlushThreshold", (void *)n_qb_setflush},
+        {"nvnQueueBuilderGetQueueMemorySize", (void *)n_qb_getmemsize},
+        {"nvnQueueBuilderSetQueueMemory", (void *)n_qb_setmem},
+        {"nvnQueueInitialize", (void *)n_queue_init},
+        {"nvnQueueFinalize", (void *)n_queue_finalize},
+        {"nvnQueueGetError", (void *)n_queue_geterror},
+        {"nvnQueueFlush", (void *)n_queue_flush},
+        {"nvnQueueFinish", (void *)n_queue_finish},
+        {"nvnWindowInitialize", (void *)n_win_init},
+        {"nvnSyncInitialize", (void *)n_sync_init},
+        {"nvnCommandBufferInitialize", (void *)n_cb_init},
+        {"nvnMemoryPoolInitialize", (void *)n_pool_init},
     };
     for (unsigned i = 0; i < sizeof known / sizeof known[0]; i++)
         if (!strcmp(known[i].nm, name)) return known[i].fn;
