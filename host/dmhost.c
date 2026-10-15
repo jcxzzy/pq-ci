@@ -380,13 +380,22 @@ static void h_excstack(uint64_t *out) {
 }
 typedef struct { const char *name; hle_fn0 fn; } hle_ent;
 static hle_fn0 force_lookup(const char *name) {
+    // nnMain 开局序（main+0xbfdcdc 反汇编实证）：time::Initialize(+0x74) 连 sm IPC、
+    // vi::Initialize(+0x108)、nv::InitializeGraphics(+0xe4, 64MB)；其余为
+    // nninitInitializeSdkModule 的服务初始化（d2r hle_sdkinit.c 同款名单）。
     static const hle_ent tab[] = {
         {"nndiagStartup", h_noop},
         {"_ZN2nn2oe10InitializeEv", h_noop},
         {"_ZN2nn3aoc10InitializeEv", h_noop},
         {"_ZN2nn4pctl10InitializeEv", h_noop},
+        {"_ZN2nn3err26InitializeContextWriterApiEv", h_noop},
+        {"_ZN2nn2fs24InitializeForApplicationEv", h_noop},
         {"_ZN2nn4diag34InitializeApplicationAbortObserverEv", h_noop},
         {"nnosGetDefaultUserExceptionStackForApplication", (hle_fn0)h_excstack},
+        {"_ZN2nn2sm10InitializeEv", h_noop},      // nnMain+0x74 起的服务链：无服务进程，接口级接管
+        {"_ZN2nn4time10InitializeEv", h_noop},
+        {"_ZN2nn2vi10InitializeEv", h_noop},
+        {"_ZN2nv18InitializeGraphicsEPvm", h_noop},
     };
     for (unsigned i = 0; i < sizeof tab / sizeof tab[0]; i++)
         if (!strcmp(tab[i].name, name)) return tab[i].fn;
