@@ -701,9 +701,9 @@ static uint32_t h_closefile(uint64_t h) {
 static uint32_t h_flushfile(uint64_t h) { (void)h; return 0; }
 static uint32_t h_getentrytype(int32_t *out, const char *path) {
     char hp[1100];
-    if (host_path(path, hp, sizeof hp) < 0) { LOG("GetEntryType(%s) 未挂载", path); return FS_ENOENT; }
+    if (host_path(path, hp, sizeof hp) < 0) { LOG("GetEntryType(%s) 未挂载 ← %p", path, __builtin_return_address(0)); return FS_ENOENT; }
     struct stat st;
-    if (stat(hp, &st)) { LOG("GetEntryType(%s) stat 失败 errno=%d", path, errno); return FS_ENOENT; }
+    if (stat(hp, &st)) { LOG("GetEntryType(%s) stat 失败 errno=%d ← %p", path, errno, __builtin_return_address(0)); return FS_ENOENT; }
     *out = S_ISDIR(st.st_mode) ? 1 : 0;   // 本 SDK 的 DirectoryEntryType：1=目录 0=文件（il2cpp GetFileAttributes 映射反汇编实证；2 是非法值会触发断言）
     LOG("GetEntryType(%s) → type=%d", path, *out);
     return 0;
