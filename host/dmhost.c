@@ -153,8 +153,8 @@ static uint64_t svc_impl(int num, uint64_t *x) {
         *(int32_t *)(uintptr_t)x[0] = 0;
         return 0;
     }
-    case 41: {  // GetThreadContext3(out)：0x400 字节清零（栈上的客体缓冲）
-        memset((void *)(uintptr_t)x[0], 0, 0x400);
+    case 41: {  // GetThreadContext3(out)：ThreadContext 恰为 0x328 字节（多清会抹掉调用者栈上的保存 LR）
+        memset((void *)(uintptr_t)x[0], 0, 0x328);
         return 0;
     }
     default:
@@ -178,6 +178,7 @@ uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
             if (g->arg < 256 && !hit[g->arg]++) LOG("svc#%d 首次命中（x0=%#llx）", g->arg, (unsigned long long)regs[0]);
             uint64_t r = svc_impl(g->arg, regs);
             if (r == 0xF001) LOG("svc#%d 未实现 → 0xF001", g->arg);
+            regs[0] = r;   // 门契约：结果写进保存区，entry.S 恢复时带回客体 x0
             return r;
         }
         if (!g->ret) die("unknown gate at %#llx", (unsigned long long)ret_addr);
