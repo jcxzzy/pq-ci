@@ -102,20 +102,63 @@ static void gate_register(uint64_t ret, const char *kind, int arg) {
 
 static uint64_t now_ns(void) { return (uint64_t)clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW); }
 
-// svc 处理器：号表与语义按 bootsim 实证清单。返回值 = Result（0 成功）。
+// 客体堆（SetHeapSize / QueryMemory 共用）
+static void *guest_heap(void) {
+    static void *h;
+    if (!h) {
+        h = mmap(NULL, 0x10000000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (h == MAP_FAILED) die("客体堆 mmap");
+    }
+    return h;
+}
+
+// svc 处理器：号表与语义按 bootsim 实证清单（首个 arm64 运行：41→29→38 后等待）。
+// 返回值 = Result（0 成功）；未实现的返回 0xF001 并记名一次。
 static uint64_t svc_impl(int num, uint64_t *x) {
     switch (num) {
-    case 1:  // SetHeapSize(size) → 出参地址在 x1（由装载器分配的客体堆）
-        x[1] = 0;  // TODO: mmap 客体堆后回填
+    case 1:  // SetHeapSize(size) → x1 = 堆地址
+        x[1] = (uint64_t)guest_heap();
         return 0;
-    case 23: // GetSystemTick（19.2 MHz）
+    case 4: {  // QueryMemory(out MemoryInfo, addr)：堆区=InUse，其余=Unmapped
+        uint64_t addr = x[1];
+        void *h = guest_heap();
+        struct { uint64_t base, size; uint32_t state, attr, ipc, perm, pad; } mi = {0};
+        if ((uint64_t)h <= addr && addr < (uint64_t)h + 0x10000000) {
+            mi.base = (uint64_t)h; mi.size = 0x10000000; mi.state = 3; mi.perm = 0x77;
+        } else {
+            mi.base = addr & ~0x3FFFul; mi.size = 0x4000; mi.state = 0;
+        }
+        memcpy((void *)(uintptr_t)x[0], &mi, sizeof mi);
+        return 0;
+    }
+    case 23:  // GetSystemTick（19.2 MHz）
         return now_ns() * 12 / 625;
-    case 11: { // GetThreadPriority(out) ← 44
+    case 6:   // ExitProcess：明确记录后退出
+        LOG("svc#6 ExitProcess（启动序中退出）");
+        _exit(0);
+    case 11: {  // GetThreadPriority(out) ← 44
         *(uint32_t *)(uintptr_t)x[0] = 44;
         return 0;
     }
+    case 12:  // SetThreadPriority
+        return 0;
+    case 29: {  // GetThreadCoreMask(out_mask, out_pref, handle)
+        *(uint64_t *)(uintptr_t)x[0] = 1;
+        *(int32_t *)(uintptr_t)x[1] = 0;
+        return 0;
+    }
+    case 33:  // SetThreadActivity
+        return 0;
+    case 38: {  // GetThreadActivity(out) ← 0（可运行）
+        *(int32_t *)(uintptr_t)x[0] = 0;
+        return 0;
+    }
+    case 41: {  // GetThreadContext3(out)：0x400 字节清零（栈上的客体缓冲）
+        memset((void *)(uintptr_t)x[0], 0, 0x400);
+        return 0;
+    }
     default:
-        return 0xF001;   // 未实现：KernelError 未实现（记名，见 LOG）
+        return 0xF001;
     }
 }
 
