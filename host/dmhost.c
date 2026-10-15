@@ -390,6 +390,18 @@ static uint32_t h_mountrom(const char *name, void *buf, uint64_t sz) {
     LOG("MountRom %s buf=%p size=%#llx（占位，RomFS 未实装）", name ? name : "?", buf, (unsigned long long)sz);
     return 0;
 }
+// 诊断接管：SDK 的中止/断言路径把 file/func/expr/line/Result 直接交给我们打印，
+// 比只看 Break reason 高效得多（main 的内部函数无符号，栈帧标不出名）。
+static uint32_t h_abortimpl(const char *file, const char *func, const char *expr, int line, const uint32_t *result, ...) {
+    LOG("客体中止 AbortImpl：file=%s func=%s expr=%s line=%d Result=%#x",
+        file ? file : "?", func ? func : "?", expr ? expr : "?", line, result ? *result : 0);
+    _exit(83);
+}
+static uint32_t h_assertfail(int type, const char *file, const char *func, const char *expr, int line) {
+    LOG("客体断言 OnAssertionFailure：type=%d file=%s func=%s expr=%s line=%d", type,
+        file ? file : "?", func ? func : "?", expr ? expr : "?", line);
+    _exit(84);
+}
 typedef struct { const char *name; hle_fn0 fn; } hle_ent;
 static hle_fn0 force_lookup(const char *name) {
     // nnMain 开局序（main+0xbfdcdc 反汇编实证）：time::Initialize(+0x74) 连 sm IPC、
@@ -416,6 +428,9 @@ static hle_fn0 force_lookup(const char *name) {
         {"_ZN2nn2oe44SetPerformanceModeChangedNotificationEnabledEb", h_noop},
         {"_ZN2nn2oe42SetOperationModeChangedNotificationEnabledEb", h_noop},
         {"_ZN2nn2oe25TryPopNotificationMessageEPj", h_noop},   // 返回 0：nnMain+0x78c tbz w0,#0 → 跳过读消息
+        {"_ZN2nn4diag6detail9AbortImplEPKcS3_S3_iPKNS_6ResultEPKNS_2os17UserExceptionInfoES3_z", (hle_fn0)h_abortimpl},
+        {"_ZN2nn4diag6detail9AbortImplEPKcS3_S3_iS3_z", (hle_fn0)h_abortimpl},
+        {"_ZN2nn4diag6detail18OnAssertionFailureENS0_13AssertionTypeEPKcS4_S4_i", (hle_fn0)h_assertfail},
     };
     for (unsigned i = 0; i < sizeof tab / sizeof tab[0]; i++)
         if (!strcmp(tab[i].name, name)) return tab[i].fn;
