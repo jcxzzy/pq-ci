@@ -154,6 +154,7 @@ static struct { int type; void *obj; } g_htab[MAX_H];
 static pthread_mutex_t G = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t GV = PTHREAD_COND_INITIALIZER;
 static thr_t *g_thr_all;
+static thr_t *g_thr_main;
 static __thread thr_t *t_cur;
 extern void dm_thread_enter(uint64_t, uint64_t, uint64_t);
 void dm_thread_returned(void) { die("客体线程入口返回（须经 ExitThread 退出）"); }
@@ -197,10 +198,15 @@ static void *thread_main(void *p) {
 }
 static void thread_exit_current(void) {
     thr_t *t = t_cur;
-    if (!t) _exit(0);   // 主线程 ExitThread ≈ 进程退出
+    void guest_backtrace(uint64_t);
+    if (t) LOG("ExitThread h=%#x%s", t->handle, t == g_thr_main ? "（主线程：进程随之结束）" : "");
+    else LOG("ExitThread（无登记线程）");
+    guest_backtrace((uint64_t)__builtin_frame_address(0));
     pthread_mutex_lock(&G);
-    t->exited = 1;
-    pthread_cond_broadcast(&GV);
+    if (t) {
+        t->exited = 1;
+        pthread_cond_broadcast(&GV);
+    }
     pthread_mutex_unlock(&G);
     pthread_exit(NULL);
 }
@@ -212,6 +218,7 @@ static uint32_t main_thread_register(void) {
     mt.all = g_thr_all; g_thr_all = &mt;
     pthread_mutex_unlock(&G);
     t_cur = &mt;
+    g_thr_main = &mt;
     return mt.handle;
 }
 // 出参契约按各包装函数 svc 后指令实证（全量扫描 106 个门）：小标量一律从寄存器回——
