@@ -755,6 +755,17 @@ static uint32_t h_vi_opendefault(void **out) {   // 假 Display 句柄：Unity �
     if (out) *out = (void *)(uintptr_t)0x55490001;
     return 0;
 }
+static uint32_t h_vi_createlayer(void **out, void *display) {   // 假 Layer：出参必须写真值
+    (void)display;
+    if (out) *out = (void *)(uintptr_t)0x55490002;
+    return 0;
+}
+static uint32_t h_vi_getnativewindow(void **out, void *layer) {   // 假 native window：给块可读的零缓冲
+    (void)layer;
+    static uint8_t g_fake_nw[0x1000];
+    if (out) *out = g_fake_nw;
+    return 0;
+}
 // ---------- NVN 接口层（d2r hle_nvn.c 的最小起点） ----------
 // main 只导入 nvnBootstrapLoader 一个 nvn 符号——NVN 全 API 按名字经它取函数指针，
 // 强制接管后 sdk 里的 NVN 驱动栈整块不执行。第一步每个名字发「记名桩」：
@@ -805,6 +816,8 @@ static hle_fn0 force_lookup(const char *name) {
         {"_ZN2nn4nifm10InitializeEv", h_noop},   // 网络接口服务：Unity 启动必查；连接类接口后续按需接管
         {"_ZN2nn6socket10InitializeEPvmmi", h_noop},   // BSD 套接字层（在线功能；离线跑通为要）
         {"_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE", (hle_fn0)h_vi_opendefault},   // 假 Display；vi 其余接口走命名桩
+        {"_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE", (hle_fn0)h_vi_createlayer},
+        {"_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE", (hle_fn0)h_vi_getnativewindow},
         {"nvnBootstrapLoader", (hle_fn0)h_nvn_bootstrap},   // NVN 全接口经此按名取函数指针；记名桩收集调用面
         {"_ZN2nn2fs22GetGlobalAccessLogModeEPj", (hle_fn0)h_logmode},
         {"_ZN2nn2fs22QueryMountRomCacheSizeEPm", (hle_fn0)h_romcache},
