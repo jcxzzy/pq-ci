@@ -745,8 +745,19 @@ static uint32_t h_vi_opendefault(void **out) {   // 假 Display 句柄：Unity �
 // 强制接管后 sdk 里的 NVN 驱动栈整块不执行。第一步每个名字发「记名桩」：
 // 回 0 恰是 NVN_SUCCESS（设备/队列/窗口初始化族天然通过），首次调用记名——
 // 在 runner 上收集 Unity 实际调用的 NVN 面，再按 d2r 的语义分层逐个实装。
+static void *h_nvn_bootstrap(const char *name);
+static void *h_nvn_getprocaddr(void *dev, const char *name) {
+    void *fn = h_nvn_bootstrap(name);
+    LOG("nvnDeviceGetProcAddress(%s) → %p", name && (uintptr_t)name > 0x10000 ? name : "?", fn);
+    return fn;
+}
 static void *h_nvn_bootstrap(const char *name) {
     if (!name || !*name) return NULL;
+    static const struct { const char *nm; void *fn; } known[] = {
+        {"nvnDeviceGetProcAddress", (void *)h_nvn_getprocaddr},
+    };
+    for (unsigned i = 0; i < sizeof known / sizeof known[0]; i++)
+        if (!strcmp(known[i].nm, name)) return known[i].fn;
     for (unsigned k = 0; k < g_nstub; k++)
         if (g_stub_name[k] && !strcmp(g_stub_name[k], name)) return &unimpl_stubs[k];
     if (g_nstub >= MAX_STUB) die("nvn 桩表满");
