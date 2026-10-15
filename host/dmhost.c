@@ -700,9 +700,9 @@ static uint32_t h_closefile(uint64_t h) {
 static uint32_t h_flushfile(uint64_t h) { (void)h; return 0; }
 static uint32_t h_getentrytype(int32_t *out, const char *path) {
     char hp[1100];
-    if (host_path(path, hp, sizeof hp) < 0) return FS_ENOENT;
+    if (host_path(path, hp, sizeof hp) < 0) { LOG("GetEntryType(%s) 未挂载", path); return FS_ENOENT; }
     struct stat st;
-    if (stat(hp, &st)) return FS_ENOENT;
+    if (stat(hp, &st)) { LOG("GetEntryType(%s) stat 失败 errno=%d", path, errno); return FS_ENOENT; }
     *out = S_ISDIR(st.st_mode) ? 1 : 2;   // DirectoryEntryType: 1=目录 2=文件
     return 0;
 }
