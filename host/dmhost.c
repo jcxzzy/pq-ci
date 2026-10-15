@@ -734,6 +734,10 @@ static uint32_t h_writefile(uint64_t h, int64_t off, const void *buf, uint64_t n
     ssize_t r = pwrite(g_fh[h], buf, n, (off_t)off);
     return r < 0 ? 0xFA01 : 0;
 }
+static uint32_t h_vi_opendefault(void **out) {   // 假 Display 句柄：Unity 需要非空才能走下去
+    if (out) *out = (void *)(uintptr_t)0x55490001;
+    return 0;
+}
 typedef struct { const char *name; hle_fn0 fn; } hle_ent;
 static hle_fn0 force_lookup(const char *name) {
     // nnMain 开局序（main+0xbfdcdc 反汇编实证）：time::Initialize(+0x74) 连 sm IPC、
@@ -754,6 +758,7 @@ static hle_fn0 force_lookup(const char *name) {
         {"_ZN2nv18InitializeGraphicsEPvm", h_noop},
         {"_ZN2nn4nifm10InitializeEv", h_noop},   // 网络接口服务：Unity 启动必查；连接类接口后续按需接管
         {"_ZN2nn6socket10InitializeEPvmmi", h_noop},   // BSD 套接字层（在线功能；离线跑通为要）
+        {"_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE", (hle_fn0)h_vi_opendefault},   // 假 Display；vi 其余接口走命名桩
         {"_ZN2nn2fs22GetGlobalAccessLogModeEPj", (hle_fn0)h_logmode},
         {"_ZN2nn2fs22QueryMountRomCacheSizeEPm", (hle_fn0)h_romcache},
         {"_ZN2nn2fs8MountRomEPKcPvm", (hle_fn0)h_mountrom},
@@ -878,8 +883,8 @@ static void relocate(module_t *m) {
             uint64_t v;
             hle_fn0 hf = force_lookup(nm);   // HLE_FORCE：接管优先于一切定义
             if (hf) v = (uint64_t)hf;
-            else if (strcmp(m->name, "sdk") && (!strncmp(nm, "_ZN2nn3hid", 10) || !strncmp(nm, "_ZN2nn5audio", 12)))
-                v = resolve_import(m, nm);   // hid/audio 只对 main/subsdk0 接命名桩（sdk 自身初始化要绑真实现，如 AudioRendererManager 单例构造）；首次命中记名、回 0、不写出参
+            else if (strcmp(m->name, "sdk") && (!strncmp(nm, "_ZN2nn3hid", 10) || !strncmp(nm, "_ZN2nn5audio", 12) || !strncmp(nm, "_ZN2nn2vi", 9)))
+                v = resolve_import(m, nm);   // hid/audio/vi 只对 main/subsdk0 接命名桩（sdk 自身初始化要绑真实现）；首次命中记名、回 0、不写出参
             else if (s->st_shndx) v = (uint64_t)m->base + s->st_value;
             else {
                 void *p = NULL;
