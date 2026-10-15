@@ -162,7 +162,7 @@ static uint64_t svc_impl(int num, uint64_t *x) {
     }
 }
 
-static int g_last_svc = -1;   // 崩溃现场用
+static int g_last_svc = -1;   // 崩溃现场用（fault.c 读取）
 
 uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
     for (unsigned i = gate_h(ret_addr);; i = (i + 1) & ((1u << GATE_BITS) - 1)) {
@@ -184,31 +184,11 @@ uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
     }
 }
 
-// ---------- 崩溃现场：PC 归属到模块内偏移 + 最近一次 svc ----------
-#include <signal.h>
-#include <ucontext.h>
-static void fault_dump(int sig, siginfo_t *si, void *uc_) {
-    ucontext_t *uc = uc_;
-    uint64_t pc = uc->uc_mcontext->__ss.__pc, lr = uc->uc_mcontext->__ss.__lr;
-    const char *w = "非模块区";
-    char buf[64] = "";
-    for (int i = 0; i < g_nmod; i++) {
-        uint64_t b = (uint64_t)g_mod[i].base;
-        if (pc >= b && pc < b + g_mod[i].size) { snprintf(buf, sizeof buf, "%s+%#llx", g_mod[i].name, (unsigned long long)(pc - b)); w = buf; break; }
-    }
-    fprintf(stderr, "[dm] FAULT sig=%d addr=%p pc=%#llx(%s) lr=%#llx 最近svc#%d\n",
-            sig, si->si_addr, (unsigned long long)pc, w, (unsigned long long)lr, g_last_svc);
-    _exit(70);
-}
-static void watchdog(int sig) { (void)sig; fprintf(stderr, "[dm] 看门狗 120 秒到期（最近svc#%d）\n", g_last_svc); _exit(71); }
-static void diag_install(void) {
-    struct sigaction sa = {0};
-    sa.sa_sigaction = fault_dump; sa.sa_flags = SA_SIGINFO;
-    sigaction(SIGSEGV, &sa, NULL); sigaction(SIGBUS, &sa, NULL); sigaction(SIGILL, &sa, NULL);
-    struct sigaction sw = {0};
-    sw.sa_handler = watchdog;
-    sigaction(SIGALRM, &sw, NULL);
-}
+// ---------- 崩溃现场与看门狗（fault.c，独立编译单元）----------
+typedef struct { char name[16]; uint8_t *base; size_t size; } mod_ref_t;
+void diag_install(void);
+mod_ref_t g_mod_ref[MAX_MOD];
+int g_nmod_ref;
 
 // ---------- 装载 ----------
 static void read_layout(module_t *m, const char *dir) {
@@ -333,6 +313,10 @@ static void load_modules(const char *dir, const char **names, int n) {
         parse_dynamic(m);
         register_gates(m, dir);
         LOG("%s: base=%p size=%#zx", m->name, m->base, m->size);
+        strlcpy(g_mod_ref[g_nmod_ref].name, m->name, sizeof g_mod_ref[0].name);
+        g_mod_ref[g_nmod_ref].base = m->base;
+        g_mod_ref[g_nmod_ref].size = m->size;
+        g_nmod_ref++;
         g_nmod++;
     }
     for (int i = 0; i < g_nmod; i++) relocate(&g_mod[i]);

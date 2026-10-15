@@ -6,11 +6,12 @@ CFLAGS = -arch arm64 -O2 -Wall -Wextra -target arm64-apple-macos11
 
 all: dmhost
 
-dmhost: dmhost.c entry.S
-	$(CC) $(CFLAGS) -o dmhost dmhost.c entry.S
+dmhost: dmhost.c fault.c entry.S
+	$(CC) $(CFLAGS) -o dmhost dmhost.c fault.c entry.S
 
-check: dmhost.c entry.S
+check: dmhost.c fault.c entry.S
 	$(CC) $(CFLAGS) -fsyntax-only dmhost.c
+	$(CC) $(CFLAGS) -fsyntax-only fault.c
 	@echo "交叉编译检查通过（arm64）"
 
 clean:
