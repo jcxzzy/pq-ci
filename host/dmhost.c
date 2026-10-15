@@ -1335,7 +1335,7 @@ int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: dmhost <产物目录> [模块…]\n"); return 2; }
     strlcpy(g_outdir, argv[1], sizeof g_outdir);
     diag_install();
-    alarm(120);   // CI 看门狗：两分钟内没走完启动序就由 watchdog 记录后终止
+    alarm(600);   // CI 看门狗：资产装载阶段耗时（192MB 池 + Unity 资源解析），10 分钟；workflow 上限 15 分钟
     const char *names[MAX_MOD]; int n = 0;
     for (int i = 2; i < argc && n < MAX_MOD; i++) names[n++] = argv[i];
     if (!n) { names[n++] = "main"; names[n++] = "sdk"; names[n++] = "subsdk0"; }
