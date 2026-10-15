@@ -550,6 +550,7 @@ static hle_fn0 force_lookup(const char *name) {
         {"_ZN2nn4time10InitializeEv", h_noop},
         {"_ZN2nn2vi10InitializeEv", h_noop},
         {"_ZN2nv18InitializeGraphicsEPvm", h_noop},
+        {"_ZN2nn4nifm10InitializeEv", h_noop},   // 网络接口服务：Unity 启动必查；连接类接口后续按需接管
         {"_ZN2nn2fs22GetGlobalAccessLogModeEPj", (hle_fn0)h_logmode},
         {"_ZN2nn2fs22QueryMountRomCacheSizeEPm", (hle_fn0)h_romcache},
         {"_ZN2nn2fs8MountRomEPKcPvm", (hle_fn0)h_mountrom},
