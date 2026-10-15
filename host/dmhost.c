@@ -1105,6 +1105,20 @@ static uint32_t h_oe_handheld(void) { return 1; }   // GetOperationMode：1=Hand
 static uint32_t h_oe_normal(void) { return 0; }     // GetPerformanceMode：0=Normal
 static uint32_t h_oe_focused(void) { return 1; }    // GetCurrentFocusState：1=InFocus
 static uint32_t h_oe_lang(uint8_t *out) { if (out) *out = 1; return 0; }   // GetDesiredLanguage：1=English（语言码表后续接宿主）
+static uint32_t h_oe_trypop(uint32_t *out) {
+    if (out) *out = 0;   // 无消息：id=0 不命中 0x10/0x1f/0x1e 任何处理器（此前不写出参，残留栈值可能被当 ExitRequested）
+    return 0;
+}
+static uint32_t h_guest_exit(int code) {
+    LOG("客体 exit(%d) ← %p ← %p", code, NVN_CALLER, __builtin_return_address(1));
+    _exit(90);
+}
+static uint32_t h_hid_zero8(void *state) { if (state) { *(uint64_t *)state = 0; ((uint32_t *)state)[2] = 0; } return 0; }   // 采样号/调度清零
+static uint32_t h_hid_touchcount(int32_t *count, void *states, int32_t max) {
+    (void)states; (void)max;
+    if (count) *count = 0;   // 无触摸点
+    return 0;
+}
 typedef struct { const char *name; hle_fn0 fn; } hle_ent;
 static hle_fn0 force_lookup(const char *name) {
     // nnMain 开局序（main+0xbfdcdc 反汇编实证）：time::Initialize(+0x74) 连 sm IPC、
@@ -1129,6 +1143,13 @@ static hle_fn0 force_lookup(const char *name) {
         {"_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE", (hle_fn0)h_vi_createlayer},
         {"_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE", (hle_fn0)h_vi_getnativewindow},
         {"nvnBootstrapLoader", (hle_fn0)h_nvn_bootstrap},   // NVN 全接口经此按名取函数指针；记名桩收集调用面
+        {"exit", (hle_fn0)h_guest_exit},          // 诊断：客体主动 exit 的调用者
+        {"_exit", (hle_fn0)h_guest_exit},
+        {"quick_exit", (hle_fn0)h_guest_exit},
+        // hid 查询（Unity 已调用）：写出参为零态，避免读到残留栈值
+        {"_ZN2nn3hid15GetNpadStyleSetERKj", h_oe_normal},                     // 无手柄样式
+        {"_ZN2nn3hid16GetDebugPadStateEPNS0_13DebugPadStateE", (hle_fn0)h_hid_zero8},
+        {"_ZN2nn3hid20GetTouchScreenStatesILm16EEEiPNS0_16TouchScreenStateIXT_EEEi", (hle_fn0)h_hid_touchcount},
         {"_ZN2nn2fs22GetGlobalAccessLogModeEPj", (hle_fn0)h_logmode},
         {"_ZN2nn2fs22QueryMountRomCacheSizeEPm", (hle_fn0)h_romcache},
         {"_ZN2nn2fs8MountRomEPKcPvm", (hle_fn0)h_mountrom},
@@ -1136,7 +1157,7 @@ static hle_fn0 force_lookup(const char *name) {
         {"_ZN2nn2oe28SetResumeNotificationEnabledEb", h_noop},
         {"_ZN2nn2oe44SetPerformanceModeChangedNotificationEnabledEb", h_noop},
         {"_ZN2nn2oe42SetOperationModeChangedNotificationEnabledEb", h_noop},
-        {"_ZN2nn2oe25TryPopNotificationMessageEPj", h_noop},   // 返回 0：nnMain+0x78c tbz w0,#0 → 跳过读消息
+        {"_ZN2nn2oe25TryPopNotificationMessageEPj", (hle_fn0)h_oe_trypop},   // 写 *out=0（无消息）+ 返回 0：nnMain+0x78c tbz w0,#0 → 跳过读消息
         {"_ZN2nn2oe16GetOperationModeEv", (hle_fn0)h_oe_handheld},
         {"_ZN2nn2oe18GetPerformanceModeEv", (hle_fn0)h_oe_normal},
         {"_ZN2nn2oe20GetCurrentFocusStateEv", (hle_fn0)h_oe_focused},
