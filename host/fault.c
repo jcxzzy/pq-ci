@@ -55,6 +55,18 @@ static void fault_dump(int sig, siginfo_t *si, void *uc_) {
             fprintf(stderr, " +%#x:%#llx", o, (unsigned long long)*(uint64_t *)(x19 + o));
     }
     fputc('\n', stderr);
+    // 帧回溯取证：崩溃点在 sub(0x30) ← pool 建立函数(0x70) ← ctx 建立函数(0x30)；
+    // 上一层函数把 ctx2 存在 [sp+0x88]（pool 函数的 x19 槽）与 [sp+0xb8]（ctx 函数的 x19 槽）
+    for (int k = 0; k < 2; k++) {
+        uint64_t slot = sp + (k ? 0xb8 : 0x88);
+        uint64_t p = *(uint64_t *)slot;
+        if (p >= g_guest_lo && p < g_guest_hi) {
+            fprintf(stderr, "[dm]   [sp+%#x]=%#llx 的 [0x90..0xc0]:", k ? 0xb8 : 0x88, (unsigned long long)p);
+            for (int o = 0x90; o <= 0xc0; o += 8)
+                fprintf(stderr, " +%#x:%#llx", o, (unsigned long long)*(uint64_t *)(p + o));
+            fputc('\n', stderr);
+        }
+    }
     guest_backtrace(fp);
     _exit(70);
 }
