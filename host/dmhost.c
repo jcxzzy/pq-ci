@@ -378,6 +378,13 @@ static void h_excstack(uint64_t *out) {
     out[1] = 0x4000;
     LOG("init 接管：客体异常栈 ← %p+%#x", es, 0x4000);
 }
+// fs 链占位：SetAllocator 会经 IsEnabledAccessLog→GetGlobalAccessLogMode 懒连接
+// fsp-srv 服务对象（svc 层空指针），按出参粒度接管；MountRom 三件套先占位走通 nnMain。
+static void h_logmode(uint32_t *out) { if (out) *out = 0; }
+static void h_romcache(uint64_t *out) { if (out) *out = 0x1000000; }
+static void h_mountrom(const char *name, void *buf, uint64_t sz) {
+    LOG("MountRom %s buf=%p size=%#llx（占位，RomFS 未实装）", name ? name : "?", buf, (unsigned long long)sz);
+}
 typedef struct { const char *name; hle_fn0 fn; } hle_ent;
 static hle_fn0 force_lookup(const char *name) {
     // nnMain 开局序（main+0xbfdcdc 反汇编实证）：time::Initialize(+0x74) 连 sm IPC、
@@ -396,6 +403,9 @@ static hle_fn0 force_lookup(const char *name) {
         {"_ZN2nn4time10InitializeEv", h_noop},
         {"_ZN2nn2vi10InitializeEv", h_noop},
         {"_ZN2nv18InitializeGraphicsEPvm", h_noop},
+        {"_ZN2nn2fs22GetGlobalAccessLogModeEPj", (hle_fn0)h_logmode},
+        {"_ZN2nn2fs22QueryMountRomCacheSizeEPm", (hle_fn0)h_romcache},
+        {"_ZN2nn2fs8MountRomEPKcPvm", (hle_fn0)h_mountrom},
     };
     for (unsigned i = 0; i < sizeof tab / sizeof tab[0]; i++)
         if (!strcmp(tab[i].name, name)) return tab[i].fn;
