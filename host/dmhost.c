@@ -1297,6 +1297,39 @@ static void register_gates(module_t *m, const char *dir) {
     LOG("%s: gates=%d", m->name, ng);
 }
 
+// ---------- 观测门：text 封 RX 前把指定 main 偏移的指令换成「记名跳桩」----------
+// 桩 = unimpl_stubs[k]（movz x9,#k; b unimpl_entry）→ unimpl_c 打一行名字后回 0。
+// 用于定位 il2cpp os::File 编排层的运行时分支边（0x4808a4/0x4808cc/0x22bd98）。
+static const struct { uint64_t off; const char *name; } g_obs_sites[] = {
+    { 0x4808a4, "OBS_fileexists_errno_ne3" },
+    { 0x4808cc, "OBS_fileexists_matcher_ok" },
+    { 0x22bd98, "OBS_struct_matcher_entry" },
+};
+static void obs_patch(module_t *m) {
+    if (strcmp(m->name, "main")) return;
+    for (unsigned i = 0; i < sizeof g_obs_sites / sizeof g_obs_sites[0]; i++) {
+        uint64_t off = g_obs_sites[i].off;
+        if (off >= m->text_end) die("观测门越界 %s", g_obs_sites[i].name);
+        // 找/建命名桩（与导入桩同表）
+        unsigned k = 0;
+        while (k < g_nstub && g_stub_name[k] && strcmp(g_stub_name[k], g_obs_sites[i].name)) k++;
+        if (k == g_nstub) {
+            if (g_nstub >= MAX_STUB) die("桩表满");
+            g_stub_name[g_nstub] = g_obs_sites[i].name;
+            k = g_nstub++;
+        }
+        uint32_t *code = (uint32_t *)(m->base + off);
+        uint32_t orig0 = code[0];
+        // bl unimpl_stubs[k]（桩地址 - (base+off)）/ 4，26 位有符号
+        int64_t delta = (int64_t)((uint8_t *)&unimpl_stubs[k] - (m->base + off)) / 4;
+        if (delta < -(1 << 25) || delta >= (1 << 25)) die("观测门超出 bl 范围 %s", g_obs_sites[i].name);
+        code[0] = 0x94000000u | (uint32_t)(delta & 0x3ffffff);
+        // nop 一条垫着（桩返回后落到下一条原指令位置继续；观测是有扰的，够定位分支边）
+        code[1] = 0xd503201fu;
+        LOG("观测门 %s @ main+%#llx（原指令 %#x）", g_obs_sites[i].name, (unsigned long long)off, orig0);
+    }
+}
+
 static void relocate(module_t *m) {
     uint64_t rela = 0, relasz = 0, jmprel = 0, pltsz = 0;
     for (const Elf64_Dyn *d = m->dyn; d->d_tag; d++) switch ((int)d->d_tag) {
@@ -1348,6 +1381,7 @@ static void load_modules(const char *dir, const char **names, int n) {
         if (read(fd, m->base, st.st_size) != st.st_size) die("read %s", path);
         close(fd);
         install_key_page(m);
+        obs_patch(m);   // text 封 RX 前打观测门（main 的 il2cpp os::File 分支边）
         uint64_t rx = (m->text_end + PAGE - 1) & ~(uint64_t)(PAGE - 1);
         if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
         if (mprotect(m->base + (m->patch_off & ~(uint64_t)(PAGE - 1)), m->size - (m->patch_off & ~(uint64_t)(PAGE - 1)), PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
