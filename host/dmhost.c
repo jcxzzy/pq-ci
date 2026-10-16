@@ -1347,6 +1347,9 @@ static const struct { uint64_t off; const char *name; } g_obs_sites[] = {
     // 流跟：归档查找调用点与设置读取调用点（替换 bl，纯定位流程走向）
     { 0xc0e328, "OBS_flow_archivelookup" },
     { 0xc0e3a4, "OBS_flow_settingsread" },
+    // tbz 0xc0e2c8 的两个落点：taken=0xc0e460（打串返回 0）/ not-taken=0xc0e2cc
+    { 0xc0e460, "OBS_tbz_taken_fail" },
+    { 0xc0e2cc, "OBS_tbz_fallthrough" },
 };
 static void obs_patch(module_t *m) {
     if (strcmp(m->name, "main")) return;
