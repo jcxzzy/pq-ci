@@ -1309,6 +1309,10 @@ static const struct { uint64_t off; const char *name; } g_obs_sites[] = {
     { 0xbfe4bc, "OBS_fail_gfx_str" },
     { 0xbfe4a4, "OBS_nnmain_msgloop_tail" },
     { 0x480ffc, "OBS_direxists_ret" },
+    // 收口：PlayerMain 返回点 + 剩余两个 GetAttrWrap 调用点（找属性探测真身）
+    { 0xbfe458, "OBS_playermain_ret" },
+    { 0x47f584, "OBS_attr_caller_A" },
+    { 0x480200, "OBS_attr_caller_B" },
 };
 static void obs_patch(module_t *m) {
     if (strcmp(m->name, "main")) return;
