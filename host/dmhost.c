@@ -740,6 +740,12 @@ static uint32_t h_getentrytype(int32_t *out, const char *path) {
     if (stat(hp, &st)) { LOG("GetEntryType(%s) stat 失败 errno=%d ← %p", path, errno, __builtin_return_address(0)); return FS_ENOENT; }
     *out = S_ISDIR(st.st_mode) ? 1 : 0;   // 本 SDK 的 DirectoryEntryType：1=目录 0=文件（il2cpp GetFileAttributes 映射反汇编实证；2 是非法值会触发断言）
     LOG("GetEntryType(%s) → type=%d", path, *out);
+    if (strstr(path, "globalgamemanagers") || strstr(path, "data.unity3d")) {
+        // GGM 发现阶段：打印客体调用链，定位静默退出的决策方（零扰动，复用 fault.c 帧链回溯）
+        void guest_backtrace(uint64_t);
+        LOG("  ↑ GGM/data.unity3d 探测调用链：");
+        guest_backtrace((uint64_t)__builtin_frame_address(0));
+    }
     return 0;
 }
 static uint32_t h_opendirectory(uint64_t *out, const char *path, int mode) {
