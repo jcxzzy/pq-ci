@@ -1341,14 +1341,8 @@ static const struct { uint64_t off; const char *name; } g_obs_sites[] = {
     { 0xc0e554, "OBS_pieg_ieg_ret" },
     { 0xc0e568, "OBS_pieg_sp40_check" },
     { 0xc0e5d8, "OBS_pieg_alt_path" },
-    { 0xc0e2ac, "OBS_c0e28c_entry" },
-    // 0xc0e28c 失败链的各 bl 返回点：定位哪个子系统返回失败
-    { 0xc0e2b0, "OBS_28c_1_cebbe8_ret" },
-    { 0xc0e2b8, "OBS_28c_2_c29b90_ret" },
-    { 0xc0e2bc, "OBS_28c_3_c91d54_ret" },
-    { 0xc0e2c4, "OBS_28c_4_fae228_ret" },
-    { 0xc0e2c8, "OBS_28c_5_fac144_ret" },
     // 归档管理器运行时状态：0xc29178 处 bl 0xc18658 时 x0=manager（转储 +0x20 列表/+0x30 计数）
+    // 注意：链上返回点门（0xc0e2b0..c8）扰动过大已移除——它们毁掉 tbz 导致提前崩溃
     { 0xc29178, "OBSD_mgr_at_read" },
 };
 static void obs_patch(module_t *m) {
