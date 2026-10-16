@@ -59,8 +59,20 @@ static uint8_t g_stub_seen[MAX_STUB];
 extern uint8_t unimpl_stubs[MAX_STUB][8];
 
 uint64_t unimpl_c(unsigned idx, uint64_t *regs) {
-    if (!g_stub_seen[idx]++)
+    if (!g_stub_seen[idx]++) {
         LOG("UNIMPL %s (x0=%#llx x1=%#llx)", g_stub_name[idx], (unsigned long long)regs[0], (unsigned long long)regs[1]);
+        // OBSD_ 前缀站点：转储 x0 指向的对象头（观测归档管理器等运行时结构）
+        if (!strncmp(g_stub_name[idx], "OBSD_", 5) && regs[0] > 0x10000) {
+            uint64_t p = regs[0];
+            fprintf(stderr, "[dm]   [x0]=%#llx [%#llx]:", (unsigned long long)p, (unsigned long long)p);
+            for (int o = 0; o <= 0x38; o += 8) {
+                uint64_t v = 0;
+                memcpy(&v, (void *)(uintptr_t)(p + o), 8);
+                fprintf(stderr, " +%#x:%#llx", o, (unsigned long long)v);
+            }
+            fputc('\n', stderr);
+        }
+    }
     return 0;
 }
 
@@ -1336,6 +1348,8 @@ static const struct { uint64_t off; const char *name; } g_obs_sites[] = {
     { 0xc0e2bc, "OBS_28c_3_c91d54_ret" },
     { 0xc0e2c4, "OBS_28c_4_fae228_ret" },
     { 0xc0e2c8, "OBS_28c_5_fac144_ret" },
+    // 归档管理器运行时状态：0xc29178 处 bl 0xc18658 时 x0=manager（转储 +0x20 列表/+0x30 计数）
+    { 0xc29178, "OBSD_mgr_at_read" },
 };
 static void obs_patch(module_t *m) {
     if (strcmp(m->name, "main")) return;
