@@ -1344,6 +1344,9 @@ static const struct { uint64_t off; const char *name; } g_obs_sites[] = {
     // 归档管理器运行时状态：0xc29178 处 bl 0xc18658 时 x0=manager（转储 +0x20 列表/+0x30 计数）
     // 注意：链上返回点门（0xc0e2b0..c8）扰动过大已移除——它们毁掉 tbz 导致提前崩溃
     { 0xc29178, "OBSD_mgr_at_read" },
+    // 流跟：归档查找调用点与设置读取调用点（替换 bl，纯定位流程走向）
+    { 0xc0e328, "OBS_flow_archivelookup" },
+    { 0xc0e3a4, "OBS_flow_settingsread" },
 };
 static void obs_patch(module_t *m) {
     if (strcmp(m->name, "main")) return;
