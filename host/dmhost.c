@@ -1312,49 +1312,16 @@ static void register_gates(module_t *m, const char *dir) {
 // ---------- 观测门：text 封 RX 前把指定 main 偏移的指令换成「记名跳桩」----------
 // 桩 = unimpl_stubs[k]（movz x9,#k; b unimpl_entry）→ unimpl_c 打一行名字后回 0。
 // 用于定位 il2cpp os::File 编排层的运行时分支边（0x4808a4/0x4808cc/0x22bd98）。
+// 站点已清空（观测期结束）：门会替换原指令（bl/tbz 换成跳桩），验证修复时必须全部移除。
+// 需要再观测时按需加回：{ 偏移, "OBS_/OBSD_ 名" }（OBSD_ 前缀会转储 x0 对象头 0x40 字节）。
 static const struct { uint64_t off; const char *name; } g_obs_sites[] = {
-    { 0x4808a4, "OBS_fileexists_errno_ne3" },
-    { 0x4808cc, "OBS_fileexists_matcher_ok" },
-    { 0x22bd98, "OBS_struct_matcher_entry" },
-    // 向上铺：nnMain 尾部失败块与 PlayerMain 返回点、Directory::Exists 返回点
-    { 0xbfe4b0, "OBS_fail_player_str" },
-    { 0xbfe4bc, "OBS_fail_gfx_str" },
-    { 0xbfe4a4, "OBS_nnmain_msgloop_tail" },
-    { 0x480ffc, "OBS_direxists_ret" },
-    // 收口：PlayerMain 返回点 + 剩余两个 GetAttrWrap 调用点（找属性探测真身）
-    { 0xbfe458, "OBS_playermain_ret" },
-    { 0x47f584, "OBS_attr_caller_A" },
-    { 0x480200, "OBS_attr_caller_B" },
-    // InitializeEngineGraphics(0xfac228) 内 12 个子系统的 bl 返回点（+4）：定位谁返回失败
-    { 0xfac264, "OBS_ieg_1_d2a38c" },
-    { 0xfac268, "OBS_ieg_2_c37748" },
-    { 0xfac26c, "OBS_ieg_3_c541fc" },
-    { 0xfac27c, "OBS_ieg_4_eb2404" },
-    { 0xfac280, "OBS_ieg_5_eb2b90" },
-    { 0xfac284, "OBS_ieg_6_cef8e8" },
-    { 0xfac288, "OBS_ieg_7_1050664" },
-    { 0xfac28c, "OBS_ieg_8_c52218" },
-    { 0xfac294, "OBS_ieg_9_ea06e0" },
-    { 0xfac2a0, "OBS_ieg_10_bf6eac" },
-    // 区分：IEG 是否被调/已初始化跳走；PlayerInitEngineGraphics 后续路径；另一条 0xc0e28c 入口
-    { 0xfac3b0, "OBS_ieg_already_inited" },
-    { 0xc0e554, "OBS_pieg_ieg_ret" },
-    { 0xc0e568, "OBS_pieg_sp40_check" },
-    { 0xc0e5d8, "OBS_pieg_alt_path" },
-    // 归档管理器运行时状态：0xc29178 处 bl 0xc18658 时 x0=manager（转储 +0x20 列表/+0x30 计数）
-    // 注意：链上返回点门（0xc0e2b0..c8）扰动过大已移除——它们毁掉 tbz 导致提前崩溃
-    { 0xc29178, "OBSD_mgr_at_read" },
-    // 流跟：归档查找调用点与设置读取调用点（替换 bl，纯定位流程走向）
-    { 0xc0e328, "OBS_flow_archivelookup" },
-    { 0xc0e3a4, "OBS_flow_settingsread" },
-    // tbz 0xc0e2c8 的两个落点：taken=0xc0e460（打串返回 0）/ not-taken=0xc0e2cc
-    { 0xc0e460, "OBS_tbz_taken_fail" },
-    { 0xc0e2cc, "OBS_tbz_fallthrough" },
+    { 0, NULL },
 };
 static void obs_patch(module_t *m) {
     if (strcmp(m->name, "main")) return;
     for (unsigned i = 0; i < sizeof g_obs_sites / sizeof g_obs_sites[0]; i++) {
         uint64_t off = g_obs_sites[i].off;
+        if (!off || !g_obs_sites[i].name) continue;   // 空占位
         if (off >= m->text_end) die("观测门越界 %s", g_obs_sites[i].name);
         // 找/建命名桩（与导入桩同表）
         unsigned k = 0;
@@ -1462,6 +1429,15 @@ static void guest_main(void) {
     ((fn0)req("_init_libc0"))();
     LOG(">>> nnosInitialize");
     ((fn2)req("nnosInitialize"))(main_thread_register(), 0);
+    // d2r main.c 同款：Unity 从 argv[0] 推导设置/数据路径——缺了它设置路径为空串，
+    // PlayerInitEngine 的回退文件读取全部「未挂载」失败 → fail_player（实证）。
+    {
+        static char arg0[] = "D2R";
+        static char *argv0[2] = { arg0, NULL };
+        ((void (*)(void *))req("_ZN2nn2os11SetHostArgcEi"))((void *)(uintptr_t)1);
+        ((void (*)(void *))req("_ZN2nn2os11SetHostArgvEPPc"))(argv0);
+        LOG("argv[0]=%s 已设置", arg0);
+    }
     ((fn0)req("_init_libc1"))();
     LOG(">>> nninitInitializeSdkModule"); ((fn0)req("nninitInitializeSdkModule"))();
     LOG(">>> nninitStartup"); ((fn0)req("nninitStartup"))();
