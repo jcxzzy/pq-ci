@@ -1330,6 +1330,12 @@ static const struct { uint64_t off; const char *name; } g_obs_sites[] = {
     { 0xc0e568, "OBS_pieg_sp40_check" },
     { 0xc0e5d8, "OBS_pieg_alt_path" },
     { 0xc0e2ac, "OBS_c0e28c_entry" },
+    // 0xc0e28c 失败链的各 bl 返回点：定位哪个子系统返回失败
+    { 0xc0e2b0, "OBS_28c_1_cebbe8_ret" },
+    { 0xc0e2b8, "OBS_28c_2_c29b90_ret" },
+    { 0xc0e2bc, "OBS_28c_3_c91d54_ret" },
+    { 0xc0e2c4, "OBS_28c_4_fae228_ret" },
+    { 0xc0e2c8, "OBS_28c_5_fac144_ret" },
 };
 static void obs_patch(module_t *m) {
     if (strcmp(m->name, "main")) return;
