@@ -1324,7 +1324,8 @@ static void register_gates(module_t *m, const char *dir) {
 // 站点按需增删：{ 偏移, "OBS_/OBSD_/OBSS_ 名" }——OBS_=记名；OBSD_=转储 x0 对象头；
 // OBSS_=把 x1 当 C 串打印（附 x2）。门会替换原指令（bl/tbz→跳桩），验证修复时必须清空。
 static const struct { uint64_t off; const char *name; } g_obs_sites[] = {
-    { 0, NULL },
+    // AddArchive 拿到的归档：x23=0xc17c58 的返回（回退对象 vs 真归档）
+    { 0xc18518, "OBSD_addarchive_target" },
 };
 static void obs_patch(module_t *m) {
     if (strcmp(m->name, "main")) return;
