@@ -1313,6 +1313,17 @@ static const struct { uint64_t off; const char *name; } g_obs_sites[] = {
     { 0xbfe458, "OBS_playermain_ret" },
     { 0x47f584, "OBS_attr_caller_A" },
     { 0x480200, "OBS_attr_caller_B" },
+    // InitializeEngineGraphics(0xfac228) 内 12 个子系统的 bl 返回点（+4）：定位谁返回失败
+    { 0xfac264, "OBS_ieg_1_d2a38c" },
+    { 0xfac268, "OBS_ieg_2_c37748" },
+    { 0xfac26c, "OBS_ieg_3_c541fc" },
+    { 0xfac27c, "OBS_ieg_4_eb2404" },
+    { 0xfac280, "OBS_ieg_5_eb2b90" },
+    { 0xfac284, "OBS_ieg_6_cef8e8" },
+    { 0xfac288, "OBS_ieg_7_1050664" },
+    { 0xfac28c, "OBS_ieg_8_c52218" },
+    { 0xfac294, "OBS_ieg_9_ea06e0" },
+    { 0xfac2a0, "OBS_ieg_10_bf6eac" },
 };
 static void obs_patch(module_t *m) {
     if (strcmp(m->name, "main")) return;
