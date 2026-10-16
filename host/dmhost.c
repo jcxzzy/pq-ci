@@ -1304,6 +1304,11 @@ static const struct { uint64_t off; const char *name; } g_obs_sites[] = {
     { 0x4808a4, "OBS_fileexists_errno_ne3" },
     { 0x4808cc, "OBS_fileexists_matcher_ok" },
     { 0x22bd98, "OBS_struct_matcher_entry" },
+    // 向上铺：nnMain 尾部失败块与 PlayerMain 返回点、Directory::Exists 返回点
+    { 0xbfe4b0, "OBS_fail_player_str" },
+    { 0xbfe4bc, "OBS_fail_gfx_str" },
+    { 0xbfe4a4, "OBS_nnmain_msgloop_tail" },
+    { 0x480ffc, "OBS_direxists_ret" },
 };
 static void obs_patch(module_t *m) {
     if (strcmp(m->name, "main")) return;
