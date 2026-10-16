@@ -61,6 +61,15 @@ extern uint8_t unimpl_stubs[MAX_STUB][8];
 uint64_t unimpl_c(unsigned idx, uint64_t *regs) {
     if (!g_stub_seen[idx]++) {
         LOG("UNIMPL %s (x0=%#llx x1=%#llx)", g_stub_name[idx], (unsigned long long)regs[0], (unsigned long long)regs[1]);
+        // OBSS_ 前缀站点：把 x1 当 C 串打印（观测传给回退读取的路径）
+        if (!strncmp(g_stub_name[idx], "OBSS_", 5) && regs[1] > 0x10000) {
+            char buf[130];
+            size_t n = 0;
+            uint8_t *q = (uint8_t *)(uintptr_t)regs[1];
+            while (n < 128) { uint8_t c = q[n]; if (!c) break; buf[n] = (c >= 32 && c < 127) ? (char)c : '?'; n++; }
+            buf[n] = 0;
+            LOG("  [OBSS] x1=%s", buf);
+        }
         // OBSD_ 前缀站点：转储 x0 指向的对象头（观测归档管理器等运行时结构）
         if (!strncmp(g_stub_name[idx], "OBSD_", 5) && regs[0] > 0x10000) {
             uint64_t p = regs[0];
@@ -1315,7 +1324,7 @@ static void register_gates(module_t *m, const char *dir) {
 // 站点已清空（观测期结束）：门会替换原指令（bl/tbz 换成跳桩），验证修复时必须全部移除。
 // 需要再观测时按需加回：{ 偏移, "OBS_/OBSD_ 名" }（OBSD_ 前缀会转储 x0 对象头 0x40 字节）。
 static const struct { uint64_t off; const char *name; } g_obs_sites[] = {
-    { 0, NULL },
+    { 0xc187c0, "OBSS_fallback_path" },   // 回退尾调点：x1=路径串（br x2 被换，诊断后删）
 };
 static void obs_patch(module_t *m) {
     if (strcmp(m->name, "main")) return;
