@@ -1324,7 +1324,7 @@ static void register_gates(module_t *m, const char *dir) {
 // 站点已清空（观测期结束）：门会替换原指令（bl/tbz 换成跳桩），验证修复时必须全部移除。
 // 需要再观测时按需加回：{ 偏移, "OBS_/OBSD_ 名" }（OBSD_ 前缀会转储 x0 对象头 0x40 字节）。
 static const struct { uint64_t off; const char *name; } g_obs_sites[] = {
-    { 0xc187c0, "OBSS_fallback_path" },   // 回退尾调点：x1=路径串（br x2 被换，诊断后删）
+    { 0, NULL },
 };
 static void obs_patch(module_t *m) {
     if (strcmp(m->name, "main")) return;
