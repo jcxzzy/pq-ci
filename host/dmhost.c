@@ -1324,9 +1324,9 @@ static void register_gates(module_t *m, const char *dir) {
 // 站点按需增删：{ 偏移, "OBS_/OBSD_/OBSS_ 名" }——OBS_=记名；OBSD_=转储 x0 对象头；
 // OBSS_=把 x1 当 C 串打印（附 x2）。门会替换原指令（bl/tbz→跳桩），验证修复时必须清空。
 static const struct { uint64_t off; const char *name; } g_obs_sites[] = {
-    { 0xc29178, "OBSS_settings_path" },
-    { 0xc187a4, "OBSD_fallback_obj" },   // ldr x8,[x0] 前：x0=回退对象 → 转储其 vtable
-    { 0x4808c4, "OBSS_osfileopen_call" },
+    // 0xc0e3dc tbz w20 的两个落点：taken=0xc0e474(注册失败)/not=0xc0e3e0(成功续走)
+    { 0xc0e474, "OBS_reg_fail" },
+    { 0xc0e3e0, "OBS_reg_ok" },
 };
 static void obs_patch(module_t *m) {
     if (strcmp(m->name, "main")) return;
