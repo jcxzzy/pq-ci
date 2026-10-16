@@ -1324,6 +1324,12 @@ static const struct { uint64_t off; const char *name; } g_obs_sites[] = {
     { 0xfac28c, "OBS_ieg_8_c52218" },
     { 0xfac294, "OBS_ieg_9_ea06e0" },
     { 0xfac2a0, "OBS_ieg_10_bf6eac" },
+    // 区分：IEG 是否被调/已初始化跳走；PlayerInitEngineGraphics 后续路径；另一条 0xc0e28c 入口
+    { 0xfac3b0, "OBS_ieg_already_inited" },
+    { 0xc0e554, "OBS_pieg_ieg_ret" },
+    { 0xc0e568, "OBS_pieg_sp40_check" },
+    { 0xc0e5d8, "OBS_pieg_alt_path" },
+    { 0xc0e2ac, "OBS_c0e28c_entry" },
 };
 static void obs_patch(module_t *m) {
     if (strcmp(m->name, "main")) return;
