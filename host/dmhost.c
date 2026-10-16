@@ -1324,12 +1324,7 @@ static void register_gates(module_t *m, const char *dir) {
 // 站点按需增删：{ 偏移, "OBS_/OBSD_/OBSS_ 名" }——OBS_=记名；OBSD_=转储 x0 对象头；
 // OBSS_=把 x1 当 C 串打印（附 x2）。门会替换原指令（bl/tbz→跳桩），验证修复时必须清空。
 static const struct { uint64_t off; const char *name; } g_obs_sites[] = {
-    // 0xc2914c 内部逐步：read/parse1/parse2/build/AddArchive 的返回点
-    { 0xc2917c, "OBS_r1_read_ret" },
-    { 0xc29194, "OBS_r2_parse1_ret" },
-    { 0xc29278, "OBS_r3_parse2_ret" },
-    { 0xc292b0, "OBS_r4_build_ret" },
-    { 0xc292c8, "OBS_r5_addarchive_ret" },
+    { 0, NULL },
 };
 static void obs_patch(module_t *m) {
     if (strcmp(m->name, "main")) return;
@@ -1446,7 +1441,7 @@ static void guest_main(void) {
     // d2r main.c 同款：Unity 从 argv[0] 推导设置/数据路径——缺了它设置路径为空串，
     // PlayerInitEngine 的回退文件读取全部「未挂载」失败 → fail_player（实证）。
     {
-        static char arg0[] = "D2R";
+        static char arg0[] = "rom:/";
         static char *argv0[2] = { arg0, NULL };
         ((void (*)(void *))req("_ZN2nn2os11SetHostArgcEi"))((void *)(uintptr_t)1);
         ((void (*)(void *))req("_ZN2nn2os11SetHostArgvEPPc"))(argv0);
