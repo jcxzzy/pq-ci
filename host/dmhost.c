@@ -648,6 +648,19 @@ static uint32_t h_assertfail(int type, const char *file, const char *func, const
         file ? file : "?", func ? func : "?", expr ? expr : "?", line);
     _exit(84);
 }
+// nn::diag 普通日志落点：游戏的非断言报错（如 player 初始化失败说明）都汇到这里，
+// 不实现就全被吞——这是「静默 nnMain 返回」的主要嫌疑通道。元数据前 0x20 字节转储 +
+// 格式串按 C 变参展开（客体与宿主同为 AAPCS64 变参约定，直接 vsnprintf）。
+static uint32_t h_logimpl(const uint64_t *meta, const char *fmt, ...) {
+    va_list ap;
+    char buf[600];
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt ? fmt : "(null)", ap);
+    va_end(ap);
+    LOG("[nnlog] meta=%#llx,%#llx,%#llx,%#llx %s",
+        meta ? meta[0] : 0, meta ? meta[1] : 0, meta ? meta[2] : 0, meta ? meta[3] : 0, buf);
+    return 0;
+}
 
 // ---------- 文件系统层（d2r hle_fs.c 的目录直读方案：挂载名 → 宿主目录） ----------
 // 符号面按 PQ main 的导入清单实证（14 个）：OpenFile / ReadFile×4 / GetFileSize /
@@ -1227,6 +1240,7 @@ static hle_fn0 force_lookup(const char *name) {
         {"_ZN2nn4diag6detail9AbortImplEPKcS3_S3_iPKNS_6ResultEPKNS_2os17UserExceptionInfoES3_z", (hle_fn0)h_abortimpl},
         {"_ZN2nn4diag6detail9AbortImplEPKcS3_S3_iS3_z", (hle_fn0)h_abortimpl},
         {"_ZN2nn4diag6detail18OnAssertionFailureENS0_13AssertionTypeEPKcS4_S4_i", (hle_fn0)h_assertfail},
+        {"_ZN2nn4diag6detail7LogImplERKNS0_11LogMetaDataEPKcz", (hle_fn0)h_logimpl},
         // fs 读面（main 导入清单实证）→ 宿主 open/pread/opendir/stat
         {"_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", (hle_fn0)h_openfile},
         {"_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", (hle_fn0)h_readfile_n},
@@ -1325,7 +1339,7 @@ static void register_gates(module_t *m, const char *dir) {
 // OBSS_=把 x1 当 C 串打印（附 x2）。门会替换原指令（bl/tbz→跳桩），验证修复时必须清空。
 static const struct { uint64_t off; const char *name; } g_obs_sites[] = {
     // AddArchive 拿到的归档：x23=0xc17c58 的返回（回退对象 vs 真归档）
-    { 0xc18518, "OBSD_addarchive_target" },
+    { 0, 0 },   // 已证：AddArchive 委派回退"Local"对象是设计行为（Matches 恒真），诊断门清空
 };
 static void obs_patch(module_t *m) {
     if (strcmp(m->name, "main")) return;
