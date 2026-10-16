@@ -68,7 +68,7 @@ uint64_t unimpl_c(unsigned idx, uint64_t *regs) {
             uint8_t *q = (uint8_t *)(uintptr_t)regs[1];
             while (n < 128) { uint8_t c = q[n]; if (!c) break; buf[n] = (c >= 32 && c < 127) ? (char)c : '?'; n++; }
             buf[n] = 0;
-            LOG("  [OBSS] x1=%s", buf);
+            LOG("  [OBSS] x1=%s x2(w2)=%#llx", buf, (unsigned long long)(uint32_t)regs[2]);
         }
         // OBSD_ 前缀站点：转储 x0 指向的对象头（观测归档管理器等运行时结构）
         if (!strncmp(g_stub_name[idx], "OBSD_", 5) && regs[0] > 0x10000) {
@@ -1321,10 +1321,11 @@ static void register_gates(module_t *m, const char *dir) {
 // ---------- 观测门：text 封 RX 前把指定 main 偏移的指令换成「记名跳桩」----------
 // 桩 = unimpl_stubs[k]（movz x9,#k; b unimpl_entry）→ unimpl_c 打一行名字后回 0。
 // 用于定位 il2cpp os::File 编排层的运行时分支边（0x4808a4/0x4808cc/0x22bd98）。
-// 站点已清空（观测期结束）：门会替换原指令（bl/tbz 换成跳桩），验证修复时必须全部移除。
-// 需要再观测时按需加回：{ 偏移, "OBS_/OBSD_ 名" }（OBSD_ 前缀会转储 x0 对象头 0x40 字节）。
+// 站点按需增删：{ 偏移, "OBS_/OBSD_/OBSS_ 名" }——OBS_=记名；OBSD_=转储 x0 对象头；
+// OBSS_=把 x1 当 C 串打印（附 x2）。门会替换原指令（bl/tbz→跳桩），验证修复时必须清空。
 static const struct { uint64_t off; const char *name; } g_obs_sites[] = {
-    { 0xc29178, "OBSS_settings_path" },   // 0xc2914c 的设置读取调用点：x1=路径串
+    { 0xc29178, "OBSS_settings_path" },
+    { 0x4808c4, "OBSS_osfileopen_call" },
 };
 static void obs_patch(module_t *m) {
     if (strcmp(m->name, "main")) return;
