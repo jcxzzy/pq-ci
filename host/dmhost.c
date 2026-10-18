@@ -716,7 +716,8 @@ static uint64_t rd64_checked(const void *p) {
 }
 // AAPCS64 va_list（24B：stack/gr_top/vr_top/gr_offs/vr_offs）手工取首个 GP 变参——
 // 游戏 %s 类消息的关键实参（探测路径等）通常就是第一个变参
-struct guest_va { char *stack, *gr_top, *vr_top; long gr_offs, vr_offs; };
+// AAPCS64 va_list（0xbf5484 构造实证）：3 指针 + 2 个 int32 偏移（gr_offs=-56 表示已存 7 个 GP 变参）
+struct guest_va { char *stack, *gr_top, *vr_top; int gr_offs, vr_offs; };
 static uint64_t va_first_gp(const void *vlp) {
     struct guest_va v;
     memcpy(&v, vlp, sizeof v);
