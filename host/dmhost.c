@@ -734,18 +734,34 @@ static void guest_strlcpy(const char *src, char *dst, size_t cap) {
 static uint32_t g_gamelog_n;
 static void h_logsink(int level, const char *fmt, void *vlp) {
     if (g_gamelog_n > 400) { g_gamelog_n++; return; }
-    char buf[300], arg[240], sval[200];
+    char buf[300], arg[700];
     if (!ptr_readable(fmt)) { LOG("[gamelog L%d] <fmt 不可读 %p>", level, fmt); g_gamelog_n++; return; }
     guest_strlcpy(fmt, buf, sizeof buf);
     arg[0] = '\0';
-    if (strstr(buf, "%s") || strstr(buf, "%d") || strstr(buf, "%i")) {   // 拼首个变参（多为路径/数值）
-        uint64_t a = 0;
-        if (ptr_readable(vlp)) a = va_first_gp(vlp);
-        if (ptr_readable((const void *)(uintptr_t)a)) {
-            guest_strlcpy((const char *)(uintptr_t)a, sval, sizeof sval);
-            snprintf(arg, sizeof arg, " │ 参1=%s", sval);
-        } else {
-            snprintf(arg, sizeof arg, " │ 参1=%#llx", (unsigned long long)a);
+    if (strstr(buf, "%s") || strstr(buf, "%d") || strstr(buf, "%i")) {
+        // 打前 3 个 GP 变参（值+若可读则串）＋一次 va_list 五字段转储（校准读取槽位）
+        if (ptr_readable(vlp)) {
+            struct guest_va v;
+            memcpy(&v, vlp, sizeof v);
+            uint64_t a[3];
+            for (int k = 0; k < 3; k++) {
+                if (v.gr_offs < 0) { a[k] = rd64_checked((void *)(v.gr_top + v.gr_offs)); v.gr_offs += 8; }
+                else if (v.stack) { a[k] = rd64_checked(v.stack); v.stack += 8; }
+                else a[k] = 0;
+            }
+            char s0[96], s1[96], s2[96];
+            s0[0] = s1[0] = s2[0] = '\0';
+            if (ptr_readable((const void *)(uintptr_t)a[0])) { guest_strlcpy((const char *)(uintptr_t)a[0], s0, sizeof s0); }
+            if (ptr_readable((const void *)(uintptr_t)a[1])) { guest_strlcpy((const char *)(uintptr_t)a[1], s1, sizeof s1); }
+            if (ptr_readable((const void *)(uintptr_t)a[2])) { guest_strlcpy((const char *)(uintptr_t)a[2], s2, sizeof s2); }
+            snprintf(arg, sizeof arg, " │ 参=%#llx%s /%#llx%s /%#llx%s",
+                     (unsigned long long)a[0], s0, (unsigned long long)a[1], s1, (unsigned long long)a[2], s2);
+            if (g_gamelog_n < 6) {
+                struct guest_va w;
+                memcpy(&w, vlp, sizeof w);
+                LOG("[sink校准] stack=%p gr_top=%p vr_top=%p gr_offs=%ld vr_offs=%ld",
+                    (void *)w.stack, (void *)w.gr_top, (void *)w.vr_top, w.gr_offs, w.vr_offs);
+            }
         }
     }
     g_gamelog_n++;
