@@ -610,8 +610,17 @@ int g_nmod_ref;
 // 宿主没有服务进程：接管成空操作，服务接口用到时再逐个接管（hle_fs 等）。
 // 接管函数按客体 ABI 调用（参数在 x0..），返回值 = nn::Result，必须显式回 0——
 // 声明成 void 会让 w0 留下垃圾，客体 R_ABORT_UNLESS 一查非 0 就走 AbortImpl。
-typedef uint32_t (*hle_fn0)(void);
-static uint32_t h_noop(void) { return 0; }
+// 返回类型取 64 位：w0 写入在硬件上零扩展到 x0，返回指针的接口（GetHostArgv 等）也走同一表。
+typedef uint64_t (*hle_fn0)(void);
+static uint64_t h_noop(void) { return 0; }
+// Unity argv 与核掩码：游戏日志实证 SetHostArgv 后 GetHostArgv 侧仍读到 null
+// （「arg 0 : (null)」→ appFolder/dataFolder 全空 → GGM 路径建立在 null 上），
+// Getter 侧直接拦截返回；核掩码返 0 会让 Unity 认为可用核数为 0。
+static char g_arg0[] = "rom:/";
+static char *g_guest_argv[2] = { g_arg0, NULL };
+static uint64_t h_gethostargc(void) { LOG("GetHostArgc → 1"); return 1; }
+static uint64_t h_gethostargv(void) { LOG("GetHostArgv → %p(\"%s\")", (void *)g_guest_argv, g_guest_argv[0]); return (uint64_t)(uintptr_t)g_guest_argv; }
+static uint64_t h_threadcoremask(void) { return 0xF; }   // 4 核掩码（真机 Switch=3 核，宿主多给无妨）
 static uint32_t h_excstack(uint64_t *out) {
     mem_init();
     uint8_t *es = g_stack + STACK_CAP - 0x8000;   // 栈区顶段：线程栈自底向上分配，互不冲突
@@ -1207,7 +1216,7 @@ static void *h_nvn_bootstrap(const char *name) {
 }
 // oe 查询（服务对象因 Initialize 接管为空，直查会空表解引用）：掌机模式 + 正常性能 + 已聚焦
 static uint32_t h_oe_handheld(void) { return 1; }   // GetOperationMode：1=Handheld（触屏取向）
-static uint32_t h_oe_normal(void) { return 0; }     // GetPerformanceMode：0=Normal
+static uint64_t h_oe_normal(void) { return 0; }     // GetPerformanceMode：0=Normal
 static uint32_t h_oe_focused(void) { return 1; }    // GetCurrentFocusState：1=InFocus
 static uint32_t h_oe_lang(uint8_t *out) { if (out) *out = 1; return 0; }   // GetDesiredLanguage：1=English（语言码表后续接宿主）
 static uint32_t h_oe_trypop(uint32_t *out) {
@@ -1311,6 +1320,9 @@ static hle_fn0 force_lookup(const char *name) {
         {"_ZN2nn4diag6detail9AbortImplEPKcS3_S3_iS3_z", (hle_fn0)h_abortimpl},
         {"_ZN2nn4diag6detail18OnAssertionFailureENS0_13AssertionTypeEPKcS4_S4_i", (hle_fn0)h_assertfail},
         {"_ZN2nn4diag6detail7LogImplERKNS0_11LogMetaDataEPKcz", (hle_fn0)h_logimpl},
+        {"_ZN2nn2os11GetHostArgcEv", (hle_fn0)h_gethostargc},
+        {"_ZN2nn2os11GetHostArgvEv", (hle_fn0)h_gethostargv},
+        {"_ZN2nn2os26GetThreadAvailableCoreMaskEv", (hle_fn0)h_threadcoremask},
         // fs 读面（main 导入清单实证）→ 宿主 open/pread/opendir/stat
         {"_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", (hle_fn0)h_openfile},
         {"_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", (hle_fn0)h_readfile_n},
@@ -1525,15 +1537,11 @@ static void guest_main(void) {
     ((fn0)req("_init_libc0"))();
     LOG(">>> nnosInitialize");
     ((fn2)req("nnosInitialize"))(main_thread_register(), 0);
-    // d2r main.c 同款：Unity 从 argv[0] 推导设置/数据路径——缺了它设置路径为空串，
-    // PlayerInitEngine 的回退文件读取全部「未挂载」失败 → fail_player（实证）。
-    {
-        static char arg0[] = "rom:/";
-        static char *argv0[2] = { arg0, NULL };
-        ((void (*)(void *))req("_ZN2nn2os11SetHostArgcEi"))((void *)(uintptr_t)1);
-        ((void (*)(void *))req("_ZN2nn2os11SetHostArgvEPPc"))(argv0);
-        LOG("argv[0]=%s 已设置", arg0);
-    }
+    // d2r main.c 同款：Unity 从 argv[0] 推导设置/数据路径。SetHost* 之外再拦 GetHost*：
+    // Unity 的「arg 0 : (null)」实证 SDK 存取两侧对不上，Getter 直接回宿主数组。
+    ((void (*)(void *))req("_ZN2nn2os11SetHostArgcEi"))((void *)(uintptr_t)1);
+    ((void (*)(void *))req("_ZN2nn2os11SetHostArgvEPPc"))(g_guest_argv);
+    LOG("argv[0]=%s 已设置（Set+Get 双路）", g_guest_argv[0]);
     ((fn0)req("_init_libc1"))();
     LOG(">>> nninitInitializeSdkModule"); ((fn0)req("nninitInitializeSdkModule"))();
     LOG(">>> nninitStartup"); ((fn0)req("nninitStartup"))();
