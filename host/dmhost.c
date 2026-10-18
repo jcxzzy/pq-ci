@@ -664,13 +664,38 @@ static uint32_t h_logimpl(const uint64_t *meta, const char *fmt, ...) {
     return 0;
 }
 // 游戏侧日志汇（main+0x2c5e790 槽；0xbf5484 见槽为 0 即整条丢弃——「静默失败」主通道）。
-// 调用约定（0xbf5484 反汇编实证）：sink(w0=level, x1=fmt, x2=&va_list[24B])——
-// 变参由调用方构造 AAPCS64 va_list 结构传指针，宿主按 va_copy 语义拷出后 vsnprintf。
-static void h_logsink(int level, const char *fmt, void *vap) {
-    va_list ap;
-    char buf[600];
-    memcpy(&ap, vap, sizeof ap);
-    vsnprintf(buf, sizeof buf, fmt ? fmt : "(null)", ap);
+// 调用约定（0xbf5484 反汇编实证）：sink(w0=level, x1=fmt, x2=&va_list[24B])。
+// 第一版：只打格式串原文（%s 等不展开）——绝大多数失败原因的文本就在格式串里；
+// 变参展开（手工走 AAPCS64 va_list）在确认本汇稳定后按需再加。
+static int ptr_readable(const void *p) {
+    uintptr_t a = (uintptr_t)p;
+    if (a < 0x10000 || a >= 0x800000000000ull) return 0;
+    for (int i = 0; i < g_nmod_ref; i++) {
+        uintptr_t b = (uintptr_t)g_mod_ref[i].base;
+        if (a >= b && a < b + (uintptr_t)g_mod_ref[i].size) return 1;
+    }
+    return a >= (uintptr_t)g_guest_lo && a < (uintptr_t)g_guest_hi;
+}
+static char rd8_checked(const char *p) { return ptr_readable(p) ? *p : '\0'; }
+static void guest_strlcpy(const char *src, char *dst, size_t cap) {
+    size_t k = 0;
+    if (cap == 0) return;
+    while (k + 1 < cap) {
+        char ch = rd8_checked(src + k);
+        if (!ch) break;
+        dst[k] = (ch >= 32 && ch < 127) ? ch : '?';
+        k++;
+    }
+    dst[k] = '\0';
+}
+static uint32_t g_gamelog_n;
+static void h_logsink(int level, const char *fmt, void *vlp) {
+    (void)vlp;
+    if (g_gamelog_n > 400) { g_gamelog_n++; return; }
+    char buf[300];
+    if (!ptr_readable(fmt)) { LOG("[gamelog L%d] <fmt 不可读 %p>", level, fmt); g_gamelog_n++; return; }
+    guest_strlcpy(fmt, buf, sizeof buf);
+    g_gamelog_n++;
     LOG("[gamelog L%d] %s", level, buf);
 }
 
