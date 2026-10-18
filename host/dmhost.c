@@ -846,7 +846,42 @@ static uint32_t h_closefile(uint64_t h) {
     return 0;
 }
 static uint32_t h_flushfile(uint64_t h) { (void)h; return 0; }
+// ---------- 归档管理器修复：插入"本地松散文件"归档 ----------
+// 全链实证：mgr=[main+0x2c77850]{+0/+8 对象,+0x20 列表,+0x30 计数}；rebind(0xc18c10) 会
+// find()(0xc17c58) 并把找到的归档绑进 fs+0x410；GGM 检查(0xc2914c)=probe1(vt+0xa0「打包归档?」)
+// 须 FALSE 且 probe2(vt+0x138「文件存在?」)须 TRUE。列表空时 find 落到回退"Local"对象——
+// 其 vt+0xa0 是 isFile → GGM 被误判为打包归档 → "No GlobalGameManagers file"退出。
+// 修复：把回退 vtable 整体克隆、仅 vt+0xa0 改为恒假（=真机 ROM 归档的语义：一切按松散文件），
+// 插入列表尾部。其余槽（Read=nn::fs::ReadFile 直通、枚举、路径 getter"rom:/"）克隆即正确。
+static uint64_t g_fake_vt[0x180 / 8];
+static uint64_t g_fake_obj[16];
+static uint64_t g_fake_list[4];
+static int g_fake_installed;
+static uint64_t h_not_packed(void *self, void *fs) {
+    (void)self; (void)fs;
+    return 0;   // vt+0xa0：不是打包归档——按本地松散文件处理（真机 ROM 归档语义）
+}
+static void ensure_fake_archive(void) {
+    if (g_fake_installed) return;
+    uint64_t *mslot = (uint64_t *)(g_mod[0].base + 0x2c77850);
+    uint64_t mgr = *mslot;
+    if (!mgr) return;   // 管理器尚未构造（惰性），下次 fs 调用再试
+    uint64_t fb = *(uint64_t *)(mgr + 8);   // 回退对象（构造器置 +0=+8）
+    if (!fb) return;
+    uint64_t fvt = *(uint64_t *)fb;
+    memcpy(g_fake_vt, (void *)fvt, sizeof g_fake_vt);
+    g_fake_vt[0xa0 / 8] = (uint64_t)(uintptr_t)h_not_packed;
+    memset(g_fake_obj, 0, sizeof g_fake_obj);
+    g_fake_obj[0] = (uint64_t)(uintptr_t)g_fake_vt;
+    g_fake_list[0] = (uint64_t)(uintptr_t)g_fake_obj;
+    *(uint64_t *)(mgr + 0x20) = (uint64_t)(uintptr_t)g_fake_list;   // 列表空（计数 0），直接接管
+    *(uint64_t *)(mgr + 0x30) = 1;
+    g_fake_installed = 1;
+    LOG("伪归档已插入管理器：obj=%p vt 克隆自 %#llx（仅 vt+0xa0→恒假），列表=%p 计数=1",
+        (void *)g_fake_obj, (unsigned long long)fvt, (void *)g_fake_list);
+}
 static uint32_t h_getentrytype(int32_t *out, const char *path) {
+    ensure_fake_archive();   // 管理器构造后的第一个 fs 时机插入伪归档
     char hp[1100];
     if (host_path(path, hp, sizeof hp) < 0) { LOG("GetEntryType(%s) 未挂载 ← %p", path, __builtin_return_address(0)); return FS_ENOENT; }
     struct stat st;
