@@ -837,6 +837,18 @@ static uint32_t h_getentrytype(int32_t *out, const char *path) {
         void guest_backtrace(uint64_t);
         LOG("  ↑ GGM/data.unity3d 探测调用链：");
         guest_backtrace((uint64_t)__builtin_frame_address(0));
+        // 决定性时刻的归档管理器快照：mgr+0 与 mgr+8 是否同一对象（appFolder/dataFolder 走 +8 的 vt+0x150/0x160）
+        {
+            uint64_t mgr = *(uint64_t *)(g_mod[0].base + 0x2c77850);
+            uint64_t o0 = mgr ? *(uint64_t *)mgr : 0, o8 = mgr ? *(uint64_t *)(mgr + 8) : 0;
+            LOG("GGM 时 mgr=%#llx [+0]=%#llx(vt=%#llx) [+8]=%#llx(vt=%#llx) 列表=%#llx 计数=%llu",
+                (unsigned long long)mgr, (unsigned long long)o0,
+                o0 ? (unsigned long long)*(uint64_t *)o0 : 0,
+                (unsigned long long)o8,
+                o8 ? (unsigned long long)*(uint64_t *)o8 : 0,
+                mgr ? (unsigned long long)*(uint64_t *)(mgr + 0x20) : 0,
+                mgr ? (unsigned long long)*(uint64_t *)(mgr + 0x30) : 0);
+        }
     }
     return 0;
 }
