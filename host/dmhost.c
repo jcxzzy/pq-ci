@@ -702,7 +702,11 @@ static int ptr_readable(const void *p) {
         uintptr_t b = (uintptr_t)g_mod_ref[i].base;
         if (a >= b && a < b + (uintptr_t)g_mod_ref[i].size) return 1;
     }
-    return a >= (uintptr_t)g_guest_lo && a < (uintptr_t)g_guest_hi;
+    if (a >= (uintptr_t)g_guest_lo && a < (uintptr_t)g_guest_hi) return 1;
+    // 客体（主线程）跑在宿主栈上：va_list/内联串就在当前栈附近
+    static uintptr_t sp_anchor;
+    if (!sp_anchor) sp_anchor = (uintptr_t)&p;
+    return a >= sp_anchor - 8ull * 1024 * 1024 && a < sp_anchor + 8ull * 1024 * 1024;
 }
 static char rd8_checked(const char *p) { return ptr_readable(p) ? *p : '\0'; }
 static uint64_t rd64_checked(const void *p) {
