@@ -663,6 +663,16 @@ static uint32_t h_logimpl(const uint64_t *meta, const char *fmt, ...) {
         meta ? meta[0] : 0, meta ? meta[1] : 0, meta ? meta[2] : 0, meta ? meta[3] : 0, buf);
     return 0;
 }
+// 游戏侧日志汇（main+0x2c5e790 槽；0xbf5484 见槽为 0 即整条丢弃——「静默失败」主通道）。
+// 调用约定（0xbf5484 反汇编实证）：sink(w0=level, x1=fmt, x2=&va_list[24B])——
+// 变参由调用方构造 AAPCS64 va_list 结构传指针，宿主按 va_copy 语义拷出后 vsnprintf。
+static void h_logsink(int level, const char *fmt, void *vap) {
+    va_list ap;
+    char buf[600];
+    memcpy(&ap, vap, sizeof ap);
+    vsnprintf(buf, sizeof buf, fmt ? fmt : "(null)", ap);
+    LOG("[gamelog L%d] %s", level, buf);
+}
 
 // ---------- 文件系统层（d2r hle_fs.c 的目录直读方案：挂载名 → 宿主目录） ----------
 // 符号面按 PQ main 的导入清单实证（14 个）：OpenFile / ReadFile×4 / GetFileSize /
@@ -712,8 +722,9 @@ static uint32_t h_openfile(uint64_t *out, const char *path, int mode) {
     *out = (uint64_t)h;
     return 0;
 }
+static uint32_t g_rdlog_n;
 static uint32_t h_readfile_n(uint64_t *out, uint64_t h, int64_t off, void *buf, uint64_t n) {
-    if (!h || h >= MAX_FH || !g_fh[h]) return 0xF601;
+    if (!h || h >= MAX_FH || !g_fh[h]) { LOG("ReadFile 无效句柄 h=%llu off=%lld n=%llu", (unsigned long long)h, (long long)off, (unsigned long long)n); return 0xF601; }
     uint64_t pos;
     if (off < 0) { pos = g_fh_pos[h]; }        // -1 = 从当前位置续读（nnSdk 语义）
     else { pos = (uint64_t)off; g_fh_pos[h] = (uint64_t)off; }
@@ -721,6 +732,7 @@ static uint32_t h_readfile_n(uint64_t *out, uint64_t h, int64_t off, void *buf, 
     if (r < 0) { LOG("ReadFile h=%llu off=%lld n=%llu → errno=%d", (unsigned long long)h, (long long)off, (unsigned long long)n, errno); return 0xFA01; }
     g_fh_pos[h] = pos + (uint64_t)r;
     if (out) *out = (uint64_t)r;
+    if (g_rdlog_n < 40) { g_rdlog_n++; LOG("ReadFile h=%llu off=%lld n=%llu → %zd", (unsigned long long)h, (long long)off, (unsigned long long)n, r); }
     return 0;
 }
 static uint32_t h_getfilesize(int64_t *out, uint64_t h) {
@@ -1489,6 +1501,11 @@ static void guest_main(void) {
         }
     }
     LOG(">>> nnMain");
+    {   // 游戏日志汇：0xbf5484 见 [main+0x2c5e790]==0 即丢弃全部打印（含一切失败原因）。装宿主汇让其流出。
+        uint64_t *slot = (uint64_t *)(g_mod[0].base + 0x2c5e790);
+        LOG("游戏日志汇槽 main+0x2c5e790 原值=%#llx → 装宿主汇", (unsigned long long)*slot);
+        *slot = (uint64_t)h_logsink;
+    }
     ((fn0)req("nnMain"))();
     LOG("nnMain returned");
 }
