@@ -620,7 +620,7 @@ static char g_arg0[] = "rom:/";
 static char *g_guest_argv[2] = { g_arg0, NULL };
 static uint64_t h_gethostargc(void) { LOG("GetHostArgc → 1"); return 1; }
 static uint64_t h_gethostargv(void) { LOG("GetHostArgv → %p(\"%s\")", (void *)g_guest_argv, g_guest_argv[0]); return (uint64_t)(uintptr_t)g_guest_argv; }
-static uint64_t h_threadcoremask(void) { return 0xF; }   // 4 核掩码（真机 Switch=3 核，宿主多给无妨）
+static uint64_t h_threadcoremask(void) { return 0x7; }   // Switch 真机 3 核（Unity 按编译期核数建每核数组，多给会溢写邻区）
 static uint32_t h_excstack(uint64_t *out) {
     mem_init();
     uint8_t *es = g_stack + STACK_CAP - 0x8000;   // 栈区顶段：线程栈自底向上分配，互不冲突
