@@ -677,6 +677,21 @@ static int ptr_readable(const void *p) {
     return a >= (uintptr_t)g_guest_lo && a < (uintptr_t)g_guest_hi;
 }
 static char rd8_checked(const char *p) { return ptr_readable(p) ? *p : '\0'; }
+static uint64_t rd64_checked(const void *p) {
+    uint64_t v = 0;
+    if (ptr_readable(p)) memcpy(&v, p, sizeof v);
+    return v;
+}
+// AAPCS64 va_list（24B：stack/gr_top/vr_top/gr_offs/vr_offs）手工取首个 GP 变参——
+// 游戏 %s 类消息的关键实参（探测路径等）通常就是第一个变参
+struct guest_va { char *stack, *gr_top, *vr_top; long gr_offs, vr_offs; };
+static uint64_t va_first_gp(const void *vlp) {
+    struct guest_va v;
+    memcpy(&v, vlp, sizeof v);
+    if (v.gr_offs < 0) return rd64_checked((void *)(v.gr_top + v.gr_offs));
+    if (v.stack) return rd64_checked(v.stack);
+    return 0;
+}
 static void guest_strlcpy(const char *src, char *dst, size_t cap) {
     size_t k = 0;
     if (cap == 0) return;
@@ -690,13 +705,23 @@ static void guest_strlcpy(const char *src, char *dst, size_t cap) {
 }
 static uint32_t g_gamelog_n;
 static void h_logsink(int level, const char *fmt, void *vlp) {
-    (void)vlp;
     if (g_gamelog_n > 400) { g_gamelog_n++; return; }
-    char buf[300];
+    char buf[300], arg[240], sval[200];
     if (!ptr_readable(fmt)) { LOG("[gamelog L%d] <fmt 不可读 %p>", level, fmt); g_gamelog_n++; return; }
     guest_strlcpy(fmt, buf, sizeof buf);
+    arg[0] = '\0';
+    if (strstr(buf, "%s") || strstr(buf, "%d") || strstr(buf, "%i")) {   // 拼首个变参（多为路径/数值）
+        uint64_t a = 0;
+        if (ptr_readable(vlp)) a = va_first_gp(vlp);
+        if (ptr_readable((const void *)(uintptr_t)a)) {
+            guest_strlcpy((const char *)(uintptr_t)a, sval, sizeof sval);
+            snprintf(arg, sizeof arg, " │ 参1=%s", sval);
+        } else {
+            snprintf(arg, sizeof arg, " │ 参1=%#llx", (unsigned long long)a);
+        }
+    }
     g_gamelog_n++;
-    LOG("[gamelog L%d] %s", level, buf);
+    LOG("[gamelog L%d] %s%s", level, buf, arg);
 }
 
 // ---------- 文件系统层（d2r hle_fs.c 的目录直读方案：挂载名 → 宿主目录） ----------
