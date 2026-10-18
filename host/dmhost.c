@@ -44,6 +44,8 @@ typedef struct {
     const char *strtab;
     unsigned nsym;
     uint64_t init;
+    uint64_t init_array;      // .init_array：静态构造（日志 sink/单例注册都在这，缺跑=静默缺陷）
+    uint64_t init_array_sz;
 } module_t;
 
 static module_t g_mod[MAX_MOD];
@@ -1321,6 +1323,8 @@ static void parse_dynamic(module_t *m) {
         case DT_SYMTAB: m->symtab = (const Elf64_Sym *)(m->base + d->d_un.d_ptr); break;
         case DT_STRTAB: m->strtab = (const char *)(m->base + d->d_un.d_ptr); break;
         case DT_INIT: m->init = d->d_un.d_ptr; break;
+        case DT_INIT_ARRAY: m->init_array = d->d_un.d_ptr; break;
+        case DT_INIT_ARRAYSZ: m->init_array_sz = d->d_un.d_val; break;
     }
     m->nsym = (unsigned)(((const uint8_t *)m->strtab - (const uint8_t *)m->symtab) / sizeof(Elf64_Sym));
 }
@@ -1474,7 +1478,15 @@ static void guest_main(void) {
     ((fn0)req("_init_libc2"))();
     for (int i = 0; i < g_nmod; i++) {   // rtld 回调 B：各模块 DT_INIT（全局构造）
         module_t *m = &g_mod[i];
-        if (m->init) { LOG("%s: DT_INIT +%#llx", m->name, (unsigned long long)m->init); ((fn0)(m->base + m->init))(); }
+        if (m->init) { LOG("%s: DT_INIT +%#llx", m->name, m->init); ((fn0)(m->base + m->init))(); }
+        if (m->init_array && m->init_array_sz) {   // .init_array 静态构造：日志 sink/类注册此前全部缺跑
+            uint64_t n = m->init_array_sz / 8;
+            for (uint64_t k = 0; k < n; k++) {
+                uint64_t fn = *(uint64_t *)(m->base + m->init_array + k * 8);   // 槽已被 RELATIVE 重定位成绝对地址
+                ((fn0)fn)();
+            }
+            LOG("%s: init_array %llu 项已执行", m->name, (unsigned long long)n);
+        }
     }
     LOG(">>> nnMain");
     ((fn0)req("nnMain"))();
