@@ -643,6 +643,25 @@ static uint32_t h_mountrom(const char *name, void *buf, uint64_t sz) {
     if (!dir) { snprintf(dflt, sizeof dflt, "%s/RomFS", g_outdir[0] ? g_outdir : "out"); dir = dflt; }
     rom_mount(name, dir);
     LOG("MountRom %s → %s（目录直读）", name, dir);
+    // 归档管理器此时已构造（nnMain 早期）：转储 +0/+8 对象、+0x20 列表、+0x30 计数。
+    // appFolder/dataFolder（0xc185b8/0xc185d8）走 mgr+8 对象的 vt+0x150/0x160。
+    {
+        extern module_t g_mod[8];
+        uint64_t mgr = *(uint64_t *)(g_mod[0].base + 0x2c77850);
+        LOG("归档管理器 mgr=%#llx [+0]=%#llx [+8]=%#llx [列表+0x20]=%#llx [计数+0x30]=%#llx",
+            (unsigned long long)mgr,
+            mgr ? (unsigned long long)*(uint64_t *)mgr : 0,
+            mgr ? (unsigned long long)*(uint64_t *)(mgr + 8) : 0,
+            mgr ? (unsigned long long)*(uint64_t *)(mgr + 0x20) : 0,
+            mgr ? (unsigned long long)*(uint64_t *)(mgr + 0x30) : 0);
+        if (mgr && *(uint64_t *)(mgr + 8)) {
+            uint64_t o = *(uint64_t *)(mgr + 8), vt = *(uint64_t *)o;
+            LOG("mgr+8 对象 vtable=%#llx（main+%#llx）vt0x150=%#llx vt0x160=%#llx",
+                (unsigned long long)vt, (unsigned long long)(vt - (uint64_t)g_mod[0].base),
+                (unsigned long long)*(uint64_t *)(vt + 0x150),
+                (unsigned long long)*(uint64_t *)(vt + 0x160));
+        }
+    }
     return 0;
 }
 // 诊断接管：SDK 的中止/断言路径把 file/func/expr/line/Result 直接交给我们打印，
@@ -1563,28 +1582,11 @@ static void guest_main(void) {
         uint64_t *slot = (uint64_t *)(g_mod[0].base + 0x2c5e790);
         LOG("游戏日志汇槽 main+0x2c5e790 原值=%#llx → 装宿主汇", (unsigned long long)*slot);
         *slot = (uint64_t)h_logsink;
-        // 归档管理器运行时取证：mgr=[main+0x2c7850]；+0/+8 对象、+0x20 列表、+0x30 计数、+0x40 锁。
-        // 0xc185b8/0xc185d8（appFolder/dataFolder）读 mgr+8 对象的 vt+0x150/0x160——其为空即路径全空。
-        uint64_t mgr = *(uint64_t *)(g_mod[0].base + 0x2c7850);
-        LOG("归档管理器 mgr=%#llx：[+0]=%#llx [+8]=%#llx [列表+0x20]=%#llx [计数+0x30]=%#llx",
-            (unsigned long long)mgr,
-            mgr ? (unsigned long long)*(uint64_t *)mgr : 0,
-            mgr ? (unsigned long long)*(uint64_t *)(mgr + 8) : 0,
-            mgr ? (unsigned long long)*(uint64_t *)(mgr + 0x20) : 0,
-            mgr ? (unsigned long long)*(uint64_t *)(mgr + 0x30) : 0);
-        if (mgr && *(uint64_t *)(mgr + 8)) {
-            uint64_t o = *(uint64_t *)(mgr + 8), vt = *(uint64_t *)o;
-            LOG("mgr+8 对象 %llx vtable=%#llx（main+%#llx）vt0x150=%#llx vt0x158=%#llx vt0x160=%#llx",
-                (unsigned long long)o, (unsigned long long)vt,
-                (unsigned long long)(vt - (uint64_t)g_mod[0].base),
-                (unsigned long long)*(uint64_t *)(vt + 0x150),
-                (unsigned long long)*(uint64_t *)(vt + 0x158),
-                (unsigned long long)*(uint64_t *)(vt + 0x160));
-            uint64_t *q = (uint64_t *)o;
-            LOG("mgr+8 对象头：%#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx",
-                (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2], (unsigned long long)q[3],
-                (unsigned long long)q[4], (unsigned long long)q[5], (unsigned long long)q[6], (unsigned long long)q[7]);
-        }
+        // 归档管理器运行时取证：mgr=[main+0x2c77850]（注意：0x2c77000+0x850，七位数偏移，
+        // 早前少写一位的 0x2c7850 落在 text 里读到代码字节）。管理器在 nnMain 内惰性构造，
+        // 转储挪到 h_mountrom（MountRom 在构造之后）。此处在 nnMain 前只记槽初值。
+        uint64_t *mslot = (uint64_t *)(g_mod[0].base + 0x2c77850);
+        LOG("归档管理器槽 main+0x2c77850 初值=%#llx（nnMain 前）", (unsigned long long)*mslot);
     }
     ((fn0)req("nnMain"))();
     LOG("nnMain returned");
