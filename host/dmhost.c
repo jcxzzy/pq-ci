@@ -1256,7 +1256,15 @@ static uint32_t n_tb_getflags(const void *b) { return (uint32_t)((const texb_t *
 static uint64_t n_tb_getsize(const void *b) { texlayout_t L; tex_layout(&((const texb_t *)b)->d, &L); return L.size; }
 static uint64_t n_tb_getalign(const void *b) { texlayout_t L; tex_layout(&((const texb_t *)b)->d, &L); return L.align; }
 static uint64_t n_zcull(uint64_t sz) { uint64_t z = (sz / 2048 + 1) * 128; return z < 0x100 ? 0x100 : z; }   // 估算：每 2KB 一条 ZCull 记录
-static void n_tb_getzcull(const void *b, uint64_t *out) { texlayout_t L; tex_layout(&((const texb_t *)b)->d, &L); if (out) *out = n_zcull(L.size); }
+// ZCull 两变体按「双协议」实现：老 NVN 头（本作 2017 版）无出参、尺寸走 x0 返回
+// （CI 实证：游戏 nvnTextureGetZCullStorageSize(tex) 后 str w0——x1 是残值 0x4c0，
+// 按 out* 写即崩）；x1 确为可写地址时才补写出参（新签名兼容）。
+static uint64_t n_tb_getzcull(const void *b, uint64_t *out) {
+    texlayout_t L; tex_layout(&((const texb_t *)b)->d, &L);
+    uint64_t z = n_zcull(L.size);
+    if (out && ptr_readable(out)) *out = z;
+    return z;
+}
 // —— Texture 对象 ——
 static uint32_t n_tex_init(void *t, const void *b) {
     const texb_t *s = (const texb_t *)b; tex_t *o = (tex_t *)t;
@@ -1278,7 +1286,11 @@ static uint32_t n_tex_geti(const void *t, int which) {
         default: return 0;
     }
 }
-static void n_tex_getzcull(const void *t, uint64_t *out) { if (out) *out = n_zcull(((const tex_t *)t)->L.size); }
+static uint64_t n_tex_getzcull(const void *t, uint64_t *out) {
+    uint64_t z = n_zcull(((const tex_t *)t)->L.size);
+    if (out && ptr_readable(out)) *out = z;
+    return z;
+}
 static uint32_t n_tex_getw(const void *t) { return ((const tex_t *)t)->d.width; }
 static uint32_t n_tex_geth(const void *t) { return ((const tex_t *)t)->d.height; }
 static uint32_t n_tex_getdep(const void *t) { return ((const tex_t *)t)->d.depth; }
