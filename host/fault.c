@@ -1,6 +1,7 @@
 // 崩溃现场转储（独立编译单元：ucontext.h 在 macOS 需要 _XOPEN_SOURCE，
 // 放这里定义避免影响主文件的符号可见性）。
 #define _XOPEN_SOURCE 700
+#define _DARWIN_C_SOURCE   // _XOPEN_SOURCE 下 macOS 头会藏起 Dl_info/dladdr（CI 新 clang 实证）
 #include <dlfcn.h>
 #include <signal.h>
 #include <stdint.h>
