@@ -489,17 +489,47 @@ static uint64_t svc_impl(int num, uint64_t *x) {
         return 0;
     }
     case 28: {  // WaitProcessWideKeyAtomic(x0 互斥地址, x1 键, w2 标签, x3 超时)：原子放锁再睡
+        // 条件键协议（d2r hle_thread.c 0x1C/0x1D 同款）：SDK 的用户态 Signal 先读键字，
+        // 键字为 0 就不发 svc——宿主必须在等待者入睡前置键字=1，Signal 侧清键字；
+        // 否则信号被用户态吞掉、等待者永眠（实测 shared_1 装载后主线程+工作线程双双卡死 9 分钟）。
+        static struct { uint64_t key; int n; } g_keyw[64];
+        volatile uint32_t *km = (volatile uint32_t *)(uintptr_t)x[1];
+        uint32_t tag = (uint32_t)x[2];
+        int ki = -1;
+        for (int i = 0; i < 64; i++) {
+            if (g_keyw[i].n && g_keyw[i].key == (uint64_t)km) { ki = i; break; }
+            if (ki < 0 && !g_keyw[i].n) ki = i;
+        }
+        if (ki < 0) ki = 0;
+        g_keyw[ki].key = (uint64_t)km; g_keyw[ki].n++;
         struct timespec dl = deadline_from((int64_t)x[3]);
         pthread_mutex_lock(&G);
         volatile uint32_t *m = (volatile uint32_t *)(uintptr_t)x[0];
+        *km = 1;   // 先置键再放锁（顺序要紧：用户态 Signal 拿锁后读它决定是否发 svc）
         if (*m) { *m = 0; pthread_cond_broadcast(&GV); }
-        pthread_cond_timedwait(&GV, &G, &dl);   // 假醒无害：客体条件变量循环自己重查谓词
+        for (;;) {
+            int rc = pthread_cond_timedwait(&GV, &G, &dl);
+            if (rc == ETIMEDOUT) break;
+            if (!*km) break;   // 本键被 Signal 清零：轮到自己（其它键的广播不退）
+        }
+        g_keyw[ki].n--;
+        for (int spin = 0; !__sync_bool_compare_and_swap(m, 0, tag); spin++) {
+            // HOS 语义：醒来带着互斥锁。SDK 的用户态解锁不发 svc/不广播——
+            // 用短睡自旋等它（临界区短）；避免 cond_wait 永等无广播的释放。
+            struct timespec ts = {0, 200000};
+            pthread_mutex_unlock(&G);
+            nanosleep(&ts, NULL);
+            pthread_mutex_lock(&G);
+            if (spin > 5000) break;   // 1 秒兜底：按未持有返回（此前版本即如此，能跑）
+        }
         pthread_mutex_unlock(&G);
         return 0;
     }
-    case 29: {  // SignalProcessWideKey(x0 键, w1 唤醒数)：广播（超集，谓词重查保证正确性）
+    case 29: {  // SignalProcessWideKey(x0 键, w1 唤醒数)：广播 + 清键（等待者的退场判据）
         pthread_mutex_lock(&G);
         pthread_cond_broadcast(&GV);
+        volatile uint32_t *k = (volatile uint32_t *)(uintptr_t)x[0];
+        *k = 0;
         pthread_mutex_unlock(&G);
         return 0;
     }
