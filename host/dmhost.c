@@ -1942,6 +1942,11 @@ static void guest_main(void) {
             char tag[32]; snprintf(tag, sizeof tag, "init后:%s", m->name); nvn_reg_probe(tag);
         }
     }
+    {   // 0x2c8f390 注册表数组容量 20（+0x90..+0x130），本环境构造器共插 28 项溢出到邻居结构
+        // （邻居 ctor#136 在 0x2c8f4c0 写 float2(1,1) 属合法）——截断计数保读侧只见前 20 项。
+        uint64_t *cnt = (uint64_t *)(g_mod[0].base + 0x2c8f3a0);
+        if (*cnt > 20) { LOG("注册表计数 %llu → 20（截断防溢出）", (unsigned long long)*cnt); *cnt = 20; }
+    }
     LOG(">>> nnMain");
     {   // 游戏日志汇：0xbf5484 见 [main+0x2c5e790]==0 即丢弃全部打印（含一切失败原因）。装宿主汇让其流出。
         uint64_t *slot = (uint64_t *)(g_mod[0].base + 0x2c5e790);
