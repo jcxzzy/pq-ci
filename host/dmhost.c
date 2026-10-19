@@ -492,6 +492,21 @@ static uint64_t svc_impl(int num, uint64_t *x) {
         // 条件键协议（d2r hle_thread.c 0x1C/0x1D 同款）：SDK 的用户态 Signal 先读键字，
         // 键字为 0 就不发 svc——宿主必须在等待者入睡前置键字=1，Signal 侧清键字；
         // 否则信号被用户态吞掉、等待者永眠（实测 shared_1 装载后主线程+工作线程双双卡死 9 分钟）。
+        {   // 等待点取证：前 12 个不同调用点各记一次（模块+偏移）——卡死时定位等待方归属
+            static uint64_t seen[12];
+            static int nseen;
+            uint64_t site = x[30];
+            int dup = 0;
+            for (int i = 0; i < nseen; i++) dup |= seen[i] == site;
+            if (!dup && nseen < 12) {
+                seen[nseen++] = site;
+                const char *mn = "?";
+                uint64_t off = 0;
+                for (int i = 0; i < g_nmod; i++)
+                    if (site >= (uint64_t)(uintptr_t)g_mod[i].base && site < (uint64_t)(uintptr_t)g_mod[i].base + g_mod[i].size) { mn = g_mod[i].name; off = site - (uint64_t)(uintptr_t)g_mod[i].base; }
+                LOG("svc#28 等待点[%d] %s+%#llx", nseen - 1, mn, (unsigned long long)off);
+            }
+        }
         static struct { uint64_t key; int n; } g_keyw[64];
         volatile uint32_t *km = (volatile uint32_t *)(uintptr_t)x[1];
         uint32_t tag = (uint32_t)x[2];
@@ -526,6 +541,21 @@ static uint64_t svc_impl(int num, uint64_t *x) {
         return 0;
     }
     case 29: {  // SignalProcessWideKey(x0 键, w1 唤醒数)：广播 + 清键（等待者的退场判据）
+        {   // 发信号点取证：前 12 个不同调用点各记一次
+            static uint64_t seen[12];
+            static int nseen;
+            uint64_t site = x[30];
+            int dup = 0;
+            for (int i = 0; i < nseen; i++) dup |= seen[i] == site;
+            if (!dup && nseen < 12) {
+                seen[nseen++] = site;
+                const char *mn = "?";
+                uint64_t off = 0;
+                for (int i = 0; i < g_nmod; i++)
+                    if (site >= (uint64_t)(uintptr_t)g_mod[i].base && site < (uint64_t)(uintptr_t)g_mod[i].base + g_mod[i].size) { mn = g_mod[i].name; off = site - (uint64_t)(uintptr_t)g_mod[i].base; }
+                LOG("svc#29 发信号点[%d] %s+%#llx", nseen - 1, mn, (unsigned long long)off);
+            }
+        }
         pthread_mutex_lock(&G);
         pthread_cond_broadcast(&GV);
         volatile uint32_t *k = (volatile uint32_t *)(uintptr_t)x[0];
@@ -1324,6 +1354,7 @@ static uint32_t n_tex_init(void *t, const void *b) {
 }
 static void n_tex_fin(void *t) { ((tex_t *)t)->magic = 0; }
 static uint32_t n_tex_getflags(const void *t) { return (uint32_t)((const tex_t *)t)->d.flags; }
+static uint32_t n_tex_gettarget(const void *t) { return ((const tex_t *)t)->d.target; }
 static uint32_t n_tex_geti(const void *t, int which) {
     const tex_t *o = (const tex_t *)t;
     switch (which) {
@@ -1778,6 +1809,7 @@ static void *h_nvn_bootstrap(const char *name) {
         {"nvnTextureInitialize", (void *)n_tex_init},
         {"nvnTextureFinalize", (void *)n_tex_fin},
         {"nvnTextureGetFlags", (void *)n_tex_getflags},
+        {"nvnTextureGetTarget", (void *)n_tex_gettarget},
         {"nvnTextureGetWidth", (void *)n_tex_getw},
         {"nvnTextureGetHeight", (void *)n_tex_geth},
         {"nvnTextureGetDepth", (void *)n_tex_getdep},
@@ -1851,6 +1883,7 @@ static void *h_nvn_bootstrap(const char *name) {
         {"nvnBufferInitialize", (void *)n_buf_init},
         {"nvnBufferFinalize", (void *)n_buf_fin},
         {"nvnBufferMap", (void *)n_buf_map},
+        {"nvnBufferGetAddress", (void *)n_buf_map},   // 老 NVN 名（GetAddress=Map 的别名；UNIMPL 实证调用过）
         {"nvnBufferGetMemoryPool", (void *)n_buf_getpool},
         {"nvnBufferGetMemoryOffset", (void *)n_buf_getoff},
         {"nvnBufferFlushMappedRange", (void *)n_buf_range3},
