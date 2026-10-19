@@ -170,9 +170,10 @@ static int map_find(uint64_t a, uint64_t n) {
 typedef struct thr {
     pthread_t pt;
     uint64_t entry, arg, stack_top;
-    int prio, core, started, exited, closed;
+    int prio, core, started, exited, closed, parked;
     uint32_t handle;
     struct thr *all;
+    int hist[8];   // 最近 8 个 svc 号（环形）——看门狗时据此看各线程卡在哪类等待
 } thr_t;
 typedef struct { int signaled; } ev_t;
 enum { H_NONE = 0, H_THREAD, H_EVENT, H_FAKE };
@@ -187,11 +188,12 @@ extern void dm_thread_enter(uint64_t, uint64_t, uint64_t);
 // 工作线程入口返回：真机上线程经 ExitThread 退出；Unity 部分辅助线程会返回——
 // 停在本线程（不影响主循环），而非终止进程
 static void thread_park_forever(const char *why) {
+    if (t_cur) t_cur->parked = 1;
+    LOG("线程驻留（h=%#x，%s）", t_cur ? t_cur->handle : 0, why);
     static pthread_mutex_t pm = PTHREAD_MUTEX_INITIALIZER;
     static pthread_cond_t pc = PTHREAD_COND_INITIALIZER;
     pthread_mutex_lock(&pm);
     for (;;) pthread_cond_wait(&pc, &pm);
-    (void)why;
 }
 void dm_thread_returned(void) {
     LOG("客体线程入口返回（h=%#x）→ 永久驻留", t_cur ? t_cur->handle : 0);
@@ -259,6 +261,17 @@ static uint32_t main_thread_register(void) {
     t_cur = &mt;
     g_thr_main = &mt;
     return mt.handle;
+}
+void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体线程的落点
+    pthread_mutex_lock(&G);
+    int i = 0;
+    for (thr_t *t = g_thr_all; t; t = t->all, i++) {
+        fprintf(stderr, "[dm] 线程[%d] h=%#x%s%s%s 最近svc(旧→新):", i, t->handle,
+                t == g_thr_main ? " 主" : "", t->exited ? " 已退出" : "", t->parked ? " 已驻留" : "");
+        for (int k = 0; k < 8; k++) fprintf(stderr, " %d", t->hist[k]);
+        fputc('\n', stderr);
+    }
+    pthread_mutex_unlock(&G);
 }
 // 出参契约按各包装函数 svc 后指令实证（全量扫描 106 个门）：小标量一律从寄存器回——
 // 包装函数自己 str x1/w1（GetInfo 值=x1、SetHeapSize 基址=x1、句柄=w1、PageInfo=w1、
@@ -620,6 +633,9 @@ uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
                 return t;
             }
             g_last_svc = g->arg;
+            {   thr_t *t = t_cur;   // 线程最近 8 个 svc（环形，最旧在前）——看门狗时看各线程卡在哪
+                if (t) { memmove(t->hist, t->hist + 1, 7 * sizeof(int)); t->hist[7] = g->arg; }
+            }
             if (g->arg >= 0 && g->arg < 256 && !g_svc_seen[g->arg]++)
                 LOG("svc#%d 首次命中（x0=%#llx）", g->arg, (unsigned long long)regs[0]);
             uint64_t r = svc_impl(g->arg, regs);
@@ -2209,7 +2225,7 @@ int main(int argc, char **argv) {
     handout_reg("宿主映像锚点", (const char *)main - 0x400000, 0x800000);   // 粗范围：二进制+邻接堆的归属线索
     handout_reg("guest_argv", g_guest_argv, sizeof g_guest_argv);
     handout_reg("arg0串", g_arg0, sizeof g_arg0);
-    alarm(600);   // CI 看门狗：资产装载阶段耗时（192MB 池 + Unity 资源解析），10 分钟；workflow 上限 15 分钟
+    // 看门狗改 60 秒重复心跳（diag_install 的 setitimer）：每分钟转储线程落点
     const char *names[MAX_MOD]; int n = 0;
     for (int i = 2; i < argc && n < MAX_MOD; i++) names[n++] = argv[i];
     if (!n) { names[n++] = "main"; names[n++] = "sdk"; names[n++] = "subsdk0"; }
