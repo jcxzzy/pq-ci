@@ -174,6 +174,7 @@ typedef struct thr {
     uint32_t handle;
     struct thr *all;
     int hist[8];   // 最近 8 个 svc 号（环形）——看门狗时据此看各线程卡在哪类等待
+    uint64_t last_lr, last_x0, last_x1;   // 最后一次 svc 的调用点与参数（等待者身份取证）
 } thr_t;
 typedef struct { int signaled; } ev_t;
 enum { H_NONE = 0, H_THREAD, H_EVENT, H_FAKE };
@@ -269,6 +270,14 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
         fprintf(stderr, "[dm] 线程[%d] h=%#x%s%s%s 最近svc(旧→新):", i, t->handle,
                 t == g_thr_main ? " 主" : "", t->exited ? " 已退出" : "", t->parked ? " 已驻留" : "");
         for (int k = 0; k < 8; k++) fprintf(stderr, " %d", t->hist[k]);
+        if (!t->exited && t->last_lr) {   // 存活线程：最后一次 svc 的调用点归属 + 参数
+            const char *mn = "?";
+            uint64_t off = 0;
+            for (int j = 0; j < g_nmod; j++)
+                if (t->last_lr >= (uint64_t)(uintptr_t)g_mod[j].base && t->last_lr < (uint64_t)(uintptr_t)g_mod[j].base + g_mod[j].size) { mn = g_mod[j].name; off = t->last_lr - (uint64_t)(uintptr_t)g_mod[j].base; break; }
+            fprintf(stderr, " ← %s+%#llx x0=%#llx x1=%#llx", mn, (unsigned long long)off,
+                    (unsigned long long)t->last_x0, (unsigned long long)t->last_x1);
+        }
         fputc('\n', stderr);
     }
     pthread_mutex_unlock(&G);
@@ -701,7 +710,10 @@ uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
             }
             g_last_svc = g->arg;
             {   thr_t *t = t_cur;   // 线程最近 8 个 svc（环形，最旧在前）——看门狗时看各线程卡在哪
-                if (t) { memmove(t->hist, t->hist + 1, 7 * sizeof(int)); t->hist[7] = g->arg; }
+                if (t) {
+                    memmove(t->hist, t->hist + 1, 7 * sizeof(int)); t->hist[7] = g->arg;
+                    t->last_lr = regs[30]; t->last_x0 = regs[0]; t->last_x1 = regs[1];
+                }
             }
             if (g->arg >= 0 && g->arg < 256 && !g_svc_seen[g->arg]++)
                 LOG("svc#%d 首次命中（x0=%#llx）", g->arg, (unsigned long long)regs[0]);
