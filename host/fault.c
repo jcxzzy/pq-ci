@@ -4,6 +4,7 @@
 #define _DARWIN_C_SOURCE   // _XOPEN_SOURCE 下 macOS 头会藏起 Dl_info/dladdr（CI 新 clang 实证）
 #include <dlfcn.h>
 #include <signal.h>
+#include <sys/time.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -98,10 +99,15 @@ static void fault_dump(int sig, siginfo_t *si, void *uc_) {
     _exit(70);
 }
 
+static int wd_beats;
 static void watchdog(int sig) {
     (void)sig;
-    fprintf(stderr, "[dm] 看门狗 120 秒到期（最近svc#%d）\n", g_last_svc);
-    _exit(71);
+    fprintf(stderr, "[dm] 心跳/看门狗 第 %d 分钟（最近svc#%d）\n", wd_beats + 1, g_last_svc);
+    { void dm_dump_threads(void); dm_dump_threads(); }
+    if (++wd_beats >= 10) {   // 10 分钟：CI 时限（15 分钟）前收尾
+        fprintf(stderr, "[dm] 看门狗最终到期\n");
+        _exit(71);
+    }
 }
 
 static void on_host_exit(void) {
@@ -139,6 +145,10 @@ void diag_install(void) {
     struct sigaction sw = {0};
     sw.sa_handler = watchdog;
     sigaction(SIGALRM, &sw, NULL);
+    {   // 60 秒重复心跳：每分钟转储线程落点，10 分钟终止（替代一次性 alarm）
+        struct itimerval it = {60, 0, 60, 0};
+        setitimer(ITIMER_REAL, &it, NULL);
+    }
     struct sigaction ab = {0};
     ab.sa_sigaction = on_abort;
     ab.sa_flags = SA_SIGINFO;
