@@ -13,6 +13,10 @@ extern mod_ref_t g_mod_ref[8];
 extern int g_nmod_ref;
 extern int g_last_svc;
 extern uint64_t g_guest_lo, g_guest_hi;   // dmhost 预留块区间（客体堆在内）
+// 宿主移交登记（dmhost.c handout_reg）：崩溃寄存器里的宿主指针据此归属
+typedef struct { const char *name; const void *lo, *hi; } handout_t;
+extern handout_t g_handout[12];
+extern int g_nhandout;
 
 static void where_of(uint64_t a, char *out, size_t n) {
     for (int j = 0; j < g_nmod_ref; j++) {
@@ -55,6 +59,22 @@ static void fault_dump(int sig, siginfo_t *si, void *uc_) {
             fprintf(stderr, " +%#x:%#llx", o, (unsigned long long)*(uint64_t *)(x19 + o));
     }
     fputc('\n', stderr);
+    {   // 寄存器归属：x0..x28 里的宿主移交指针点名（宿主指针泄漏进客体数据 = 崩溃常见根因）
+        const char *tag[29];
+        int any = 0;
+        for (int r = 0; r <= 28; r++) {
+            uint64_t v = uc->uc_mcontext->__ss.__x[r];
+            tag[r] = NULL;
+            for (int j = 0; j < g_nhandout && !tag[r]; j++)
+                if (v >= (uint64_t)g_handout[j].lo && v < (uint64_t)g_handout[j].hi)
+                    tag[r] = g_handout[j].name;
+        }
+        fprintf(stderr, "[dm]   寄存器移交归属：");
+        for (int r = 0; r <= 28; r++)
+            if (tag[r]) { fprintf(stderr, " x%d∈%s", r, tag[r]); any = 1; }
+        if (!any) fprintf(stderr, " 无");
+        fputc('\n', stderr);
+    }
     // 帧回溯取证：崩溃点在 sub(0x30) ← pool 建立函数(0x70) ← ctx 建立函数(0x30)；
     // 上一层函数把 ctx2 存在 [sp+0x88]（pool 函数的 x19 槽）与 [sp+0xb8]（ctx 函数的 x19 槽）
     for (int k = 0; k < 2; k++) {
