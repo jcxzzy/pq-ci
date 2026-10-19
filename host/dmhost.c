@@ -636,6 +636,7 @@ static uint32_t h_logmode(uint32_t *out) { if (out) *out = 0; return 0; }
 static uint32_t h_romcache(uint64_t *out) { if (out) *out = 0x1000; return 0; }
 static char g_outdir[1024];                  // 产物目录（RomFS 在 <out>/RomFS）
 static void rom_mount(const char *, const char *);
+static void nvn_reg_probe(const char *tag);
 static uint32_t h_mountrom(const char *name, void *buf, uint64_t sz) {
     (void)buf; (void)sz;
     const char *dir = getenv("DM_ROMFS");
@@ -643,6 +644,7 @@ static uint32_t h_mountrom(const char *name, void *buf, uint64_t sz) {
     if (!dir) { snprintf(dflt, sizeof dflt, "%s/RomFS", g_outdir[0] ? g_outdir : "out"); dir = dflt; }
     rom_mount(name, dir);
     LOG("MountRom %s → %s（目录直读）", name, dir);
+    nvn_reg_probe("MountRom");
     // 归档管理器此时已构造（nnMain 早期）：转储 +0/+8 对象、+0x20 列表、+0x30 计数。
     // appFolder/dataFolder（0xc185b8/0xc185d8）走 mgr+8 对象的 vt+0x150/0x160。
     {
@@ -1906,8 +1908,10 @@ static void guest_main(void) {
     ((void (*)(void *))req("_ZN2nn2os11SetHostArgvEPPc"))(g_guest_argv);
     LOG("argv[0]=%s 已设置（Set+Get 双路）", g_guest_argv[0]);
     ((fn0)req("_init_libc1"))();
+    nvn_reg_probe("nnosInit后");
     LOG(">>> nninitInitializeSdkModule"); ((fn0)req("nninitInitializeSdkModule"))();
     LOG(">>> nninitStartup"); ((fn0)req("nninitStartup"))();
+    nvn_reg_probe("nninitStartup后");
     ((fn0)req("_init_libc2"))();
     for (int i = g_nmod - 1; i >= 0; i--) {   // rtld 回调 B：依赖序（sdk/subsdk0 先、main 后）——真机 rtld 依赖先初始化
         module_t *m = &g_mod[i];
@@ -1919,6 +1923,7 @@ static void guest_main(void) {
                 ((fn0)fn)();
             }
             LOG("%s: init_array %llu 项已执行", m->name, (unsigned long long)n);
+            char tag[32]; snprintf(tag, sizeof tag, "init后:%s", m->name); nvn_reg_probe(tag);
         }
     }
     LOG(">>> nnMain");
