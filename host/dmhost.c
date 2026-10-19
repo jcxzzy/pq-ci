@@ -332,7 +332,23 @@ static uint64_t svc_impl(int num, uint64_t *x) {
                 uint64_t top = (uint64_t)pthread_get_stackaddr_np(pthread_self());
                 uint64_t ssz = pthread_get_stacksize_np(pthread_self());
                 if (addr < top && addr >= top - ssz) { base = top - ssz; esz = ssz; state = 0xB; perm = 3; }
-                else { base = addr & ~0x3FFFull; esz = 0x4000; state = 3; perm = 5; }
+                else {   // 其余 = 大段未映射（state=0/perm=0，到下一个已知结构或 0x800000000000 为止）。
+                    // il2cpp 的内存区域枚举靠 QueryMemory 逐区前进；原先对每个未知地址回 16K 假页
+                    // （state=3 perm=5），一次枚举产生 1452 个幻影区段。真机语义这里是一整段 Inaccessible。
+                    uint64_t end = 0x800000000000ull;
+                    for (int i = 0; i < g_nmod; i++) {
+                        uint64_t b = (uint64_t)(uintptr_t)g_mod[i].base;
+                        if (b > addr && b < end) end = b;
+                    }
+                    for (int i = 0; i < g_nmap; i++)
+                        if (g_map[i].base > addr && g_map[i].base < end) end = g_map[i].base;
+                    if ((uint64_t)(uintptr_t)g_as > addr && (uint64_t)(uintptr_t)g_as < end) end = (uint64_t)(uintptr_t)g_as;
+                    if ((uint64_t)(uintptr_t)g_heap > addr && (uint64_t)(uintptr_t)g_heap < end) end = (uint64_t)(uintptr_t)g_heap;
+                    base = addr & ~0x3FFFull;
+                    if (end <= base) end = base + 0x4000;
+                    esz = end - base;
+                    state = 0; perm = 0;
+                }
             }
         }
         if (mi) {
@@ -753,6 +769,52 @@ static void guest_strlcpy(const char *src, char *dst, size_t cap) {
         k++;
     }
     dst[k] = '\0';
+}
+// ---------- 未捕获托管异常现场抢救 ----------
+// 主线程 Break 调用链已实证：main 的 il2cpp 把 C# 异常包成 Il2CppExceptionWrapper
+// （throw 点 main+0xbc53b4：__cxa_allocate_exception(8) 后 __cxa_throw）→ sdk 真实现
+// （sdk+0x3772ec，内调 std::terminate）→ AbortImpl → svc Break。main 经 PLT 导入
+// __cxa_throw，force 表可拦：读出托管异常的 _className/_message 再转发 sdk 真实现。
+static void mgstr_decode(uint64_t s, char *dst, size_t cap) {   // 托管 string → ASCII（非 ASCII 置 '?'）
+    dst[0] = '\0';
+    if (cap < 2 || !ptr_readable((void *)(uintptr_t)s)) return;
+    uint64_t len = rd64_checked((void *)(uintptr_t)(s + 0x10)) & 0xffffffffull;   // string.length(int32) @0x10
+    if (len > 256) len = 256;
+    if (len >= cap) len = cap - 1;
+    size_t k = 0;
+    while (k < len) {
+        unsigned lo = (unsigned char)rd8_checked((void *)(uintptr_t)(s + 0x14 + 2 * k));   // chars(UTF-16) @0x14
+        unsigned hi = (unsigned char)rd8_checked((void *)(uintptr_t)(s + 0x15 + 2 * k));
+        unsigned c = lo | (hi << 8);
+        dst[k] = (c >= 32 && c < 127) ? (char)c : '?';
+        k++;
+    }
+    dst[k] = '\0';
+}
+static void (*g_real_cxa_throw)(void *, void *, void *);
+static void h_cxa_throw(void *obj, void *tinfo, void *dtor) {
+    if (!g_real_cxa_throw)
+        for (int i = 0; i < g_nmod && !g_real_cxa_throw; i++)
+            g_real_cxa_throw = (typeof(g_real_cxa_throw))module_sym(&g_mod[i], "__cxa_throw");
+    char tn[80] = "";
+    if (ptr_readable(tinfo)) {
+        uint64_t np = rd64_checked((void *)((uintptr_t)tinfo + 8));   // typeinfo{vptr, name*}
+        guest_strlcpy((const char *)(uintptr_t)np, tn, sizeof tn);
+    }
+    if (strstr(tn, "Il2CppExceptionWrapper") && ptr_readable(obj)) {
+        uint64_t ex = rd64_checked(obj);   // wrapper 唯一字段：Il2CppException*
+        char cls[280] = "", msg[280] = "";
+        if (ptr_readable((void *)(uintptr_t)ex)) {
+            mgstr_decode(rd64_checked((void *)(uintptr_t)(ex + 0x10)), cls, sizeof cls);   // _className
+            mgstr_decode(rd64_checked((void *)(uintptr_t)(ex + 0x18)), msg, sizeof msg);   // _message
+        }
+        LOG("【未捕获 C# 异常】class=%s message=%s", cls, msg);
+    } else if (tn[0]) {
+        LOG("__cxa_throw(%p) 类型 %s", obj, tn);
+    }
+    if (g_real_cxa_throw) { g_real_cxa_throw(obj, tinfo, dtor); return; }
+    LOG("真 __cxa_throw 未找到 → _exit(86)");
+    _exit(86);
 }
 static uint32_t g_gamelog_n;
 static void h_logsink(int level, const char *fmt, void *vlp) {
@@ -1197,6 +1259,68 @@ static void n_sb_lodsnap(void *b, float v) { (void)b; (void)v; }
 static uint32_t n_samp_init(void *s, const void *b) { samp_t *o = (samp_t *)s; o->magic = NVN_MAGIC('S', 'M', 'P', 0); o->p = ((const sampb_t *)b)->p; return 1; }
 static void n_samp_fin(void *s) { ((samp_t *)s)->magic = 0; }
 
+// ---------- 状态对象族（d2r-mobile nvn_obj.h 打包布局，就地打包，均 ≤ 官方保留尺寸） ----------
+// 枚举值照 nvn.h：BLEND_FUNC ZERO=1/ONE=2；BLEND_EQUATION ADD=1；LOGIC_OP COPY=3；
+// ALPHA_FUNC ALWAYS=8；FACE NONE=0/FRONT=1/BACK=2；FRONT_FACE CCW=1；POLYGON_MODE FILL=2；
+// DEPTH_FUNC LESS=2；STENCIL_FUNC ALWAYS=8；STENCIL_OP KEEP=1
+typedef struct { uint64_t target:3, src_rgb:7, dst_rgb:7, src_a:7, dst_a:7, eq_rgb:3, eq_a:3; } nblend_t;   // 8B ≤ NVNblendState 8
+typedef struct { uint32_t blend_en:8, logic_op:4, alpha_func:4; } ncolor_t;                                // 4B ≤ 4
+typedef struct { uint32_t mask; } nchmask_t;                                                              // 4B ≤ 4
+typedef struct { uint8_t enable, samples, a2c, a2c_dither, raster_samples, cov_mod, cov2color_en, cov2color_out, sl_en, sl_grid; } nms_t;  // 10B ≤ 0x18
+typedef struct { uint32_t cull:2, front:1, mode:2, offset_en:3; } npoly_t;                                // 4B ≤ 4
+typedef struct { uint64_t dt:1, dw:1, df:4, st:1, sf_f:4, sf_b:4, fail_f:4, zfail_f:4, zpass_f:4, fail_b:4, zfail_b:4, zpass_b:4; } nds_t;  // 8B ≤ 8
+typedef struct { uint32_t fmt:8, offset:19, stream:5; } nvattr_t;                                         // 4B
+typedef struct { uint32_t stride, divisor; } nvstream_t;                                                  // 8B
+static void n_bl_defaults(void *s) { *(nblend_t *)s = (nblend_t){0, 2, 1, 2, 1, 1, 1}; }
+static void n_bl_target(void *s, int t) { ((nblend_t *)s)->target = (uint64_t)t & 7; }
+static void n_bl_func(void *s, int sr, int dr, int sa, int da) { nblend_t *o = s; o->src_rgb = (uint64_t)sr; o->dst_rgb = (uint64_t)dr; o->src_a = (uint64_t)sa; o->dst_a = (uint64_t)da; }
+static void n_bl_equation(void *s, int er, int ea) { nblend_t *o = s; o->eq_rgb = (uint64_t)er; o->eq_a = (uint64_t)ea; }
+static void n_co_defaults(void *s) { *(ncolor_t *)s = (ncolor_t){0, 3, 8}; }
+static void n_co_blenden(void *s, int i, uint32_t en) {
+    if (i < 0 || i > 7) return;
+    ncolor_t *o = s;
+    o->blend_en = en ? (o->blend_en | (1u << i)) : (o->blend_en & ~(1u << i));
+}
+static void n_cm_defaults(void *s) { *(uint32_t *)s = 0xffffffffu; }
+static void n_cm_mask(void *s, int i, uint32_t r, uint32_t g, uint32_t b, uint32_t a) {
+    if (i < 0 || i > 7) return;
+    uint32_t m = (r ? 1u : 0) | (g ? 2u : 0) | (b ? 4u : 0) | (a ? 8u : 0);
+    nchmask_t *o = s;
+    o->mask = (o->mask & ~(0xfu << (4 * i))) | (m << (4 * i));
+}
+static void n_ms_defaults(void *s) { memset(s, 0, sizeof(nms_t)); ((nms_t *)s)->enable = 1; }
+static void n_ms_enable(void *s, uint32_t e) { ((nms_t *)s)->enable = e != 0; }
+static void n_ms_samples(void *s, int n) { ((nms_t *)s)->samples = (uint8_t)n; }
+static void n_ms_a2c(void *s, uint32_t e) { ((nms_t *)s)->a2c = e != 0; }
+static void n_ms_slen(void *s, uint32_t e) { ((nms_t *)s)->sl_en = e != 0; }
+static void n_ms_sl(void *s, int start, int n, const float *v) { (void)s; (void)start; (void)n; (void)v; }
+static void n_pg_defaults(void *s) { *(npoly_t *)s = (npoly_t){0, 1, 2, 0}; }
+static void n_pg_cull(void *s, int f) { ((npoly_t *)s)->cull = (uint32_t)f & 3; }
+static void n_pg_front(void *s, int f) { ((npoly_t *)s)->front = (uint32_t)f & 1; }
+static void n_pg_mode(void *s, int m) { ((npoly_t *)s)->mode = (uint32_t)m & 3; }
+static void n_pg_offen(void *s, int e) { ((npoly_t *)s)->offset_en = (uint32_t)e & 7; }
+static void n_ds_defaults(void *s) { *(nds_t *)s = (nds_t){0, 1, 2, 0, 8, 8, 1, 1, 1, 1, 1, 1}; }
+static void n_ds_dtest(void *s, uint32_t e) { ((nds_t *)s)->dt = e != 0; }
+static void n_ds_dwrite(void *s, uint32_t e) { ((nds_t *)s)->dw = e != 0; }
+static void n_ds_dfunc(void *s, int f) { ((nds_t *)s)->df = (uint64_t)f & 0xF; }
+static void n_ds_stest(void *s, uint32_t e) { ((nds_t *)s)->st = e != 0; }
+static void n_ds_sfunc(void *s, int f, int fn) {
+    nds_t *o = s;
+    if (f & 1) o->sf_f = (uint64_t)fn;
+    if (f & 2) o->sf_b = (uint64_t)fn;
+}
+static void n_ds_sop(void *s, int f, int fail, int zfail, int zpass) {
+    nds_t *o = s;
+    if (f & 1) { o->fail_f = (uint64_t)fail; o->zfail_f = (uint64_t)zfail; o->zpass_f = (uint64_t)zpass; }
+    if (f & 2) { o->fail_b = (uint64_t)fail; o->zfail_b = (uint64_t)zfail; o->zpass_b = (uint64_t)zpass; }
+}
+static void n_va_defaults(void *s) { *(nvattr_t *)s = (nvattr_t){0, 0, 0}; }
+static void n_va_format(void *s, int f, int64_t off) { nvattr_t *o = s; o->fmt = (uint32_t)f & 0xFF; o->offset = (uint32_t)off & 0x7FFFF; }
+static void n_va_stream(void *s, int i) { ((nvattr_t *)s)->stream = (uint32_t)i & 0x1F; }
+static void n_vs_defaults(void *s) { *(nvstream_t *)s = (nvstream_t){0, 0}; }
+static void n_vs_stride(void *s, int64_t st) { ((nvstream_t *)s)->stride = (uint32_t)st; }
+static void n_vs_divisor(void *s, int d) { ((nvstream_t *)s)->divisor = (uint32_t)d; }
+
 
 static void *h_nvn_getprocaddr(void *dev, const char *name) {
     void *fn = h_nvn_bootstrap(name);
@@ -1567,6 +1691,39 @@ static void *h_nvn_bootstrap(const char *name) {
         {"nvnSamplerBuilderSetLodSnap", (void *)n_sb_lodsnap},
         {"nvnSamplerInitialize", (void *)n_samp_init},
         {"nvnSamplerFinalize", (void *)n_samp_fin},
+        // 状态对象族（d2r-mobile nvn_obj.h 布局，就地打包）
+        {"nvnBlendStateSetDefaults", (void *)n_bl_defaults},
+        {"nvnBlendStateSetBlendTarget", (void *)n_bl_target},
+        {"nvnBlendStateSetBlendFunc", (void *)n_bl_func},
+        {"nvnBlendStateSetBlendEquation", (void *)n_bl_equation},
+        {"nvnColorStateSetDefaults", (void *)n_co_defaults},
+        {"nvnColorStateSetBlendEnable", (void *)n_co_blenden},
+        {"nvnChannelMaskStateSetDefaults", (void *)n_cm_defaults},
+        {"nvnChannelMaskStateSetChannelMask", (void *)n_cm_mask},
+        {"nvnMultisampleStateSetDefaults", (void *)n_ms_defaults},
+        {"nvnMultisampleStateSetMultisampleEnable", (void *)n_ms_enable},
+        {"nvnMultisampleStateSetSamples", (void *)n_ms_samples},
+        {"nvnMultisampleStateSetAlphaToCoverageEnable", (void *)n_ms_a2c},
+        {"nvnMultisampleStateSetSampleLocationsEnable", (void *)n_ms_slen},
+        {"nvnMultisampleStateSetSampleLocations", (void *)n_ms_sl},
+        {"nvnPolygonStateSetDefaults", (void *)n_pg_defaults},
+        {"nvnPolygonStateSetCullFace", (void *)n_pg_cull},
+        {"nvnPolygonStateSetFrontFace", (void *)n_pg_front},
+        {"nvnPolygonStateSetPolygonMode", (void *)n_pg_mode},
+        {"nvnPolygonStateSetPolygonOffsetEnables", (void *)n_pg_offen},
+        {"nvnDepthStencilStateSetDefaults", (void *)n_ds_defaults},
+        {"nvnDepthStencilStateSetDepthTestEnable", (void *)n_ds_dtest},
+        {"nvnDepthStencilStateSetDepthWriteEnable", (void *)n_ds_dwrite},
+        {"nvnDepthStencilStateSetDepthFunc", (void *)n_ds_dfunc},
+        {"nvnDepthStencilStateSetStencilTestEnable", (void *)n_ds_stest},
+        {"nvnDepthStencilStateSetStencilFunc", (void *)n_ds_sfunc},
+        {"nvnDepthStencilStateSetStencilOp", (void *)n_ds_sop},
+        {"nvnVertexAttribStateSetDefaults", (void *)n_va_defaults},
+        {"nvnVertexAttribStateSetFormat", (void *)n_va_format},
+        {"nvnVertexAttribStateSetStreamIndex", (void *)n_va_stream},
+        {"nvnVertexStreamStateSetDefaults", (void *)n_vs_defaults},
+        {"nvnVertexStreamStateSetStride", (void *)n_vs_stride},
+        {"nvnVertexStreamStateSetDivisor", (void *)n_vs_divisor},
         {"nvnTexturePoolSetDebugLabel", (void *)n_tpool_label},
         {"nvnSamplerPoolSetDebugLabel", (void *)n_tpool_label},
         // 队列-同步
@@ -1669,6 +1826,7 @@ static hle_fn0 force_lookup(const char *name) {
         {"quick_exit", (hle_fn0)h_guest_exit},
         // 客体 stdio → 宿主 stderr（引擎日志现形）
         {"printf", (hle_fn0)h_g_printf},
+        {"__cxa_throw", (hle_fn0)h_cxa_throw},   // 未捕获托管异常的 class/message 现场（h_cxa_throw 注释）
         {"fprintf", (hle_fn0)h_g_fprintf},
         {"vfprintf", (hle_fn0)h_g_vfprintf},
         {"fwrite", (hle_fn0)h_g_fwrite},
