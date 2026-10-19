@@ -1918,9 +1918,25 @@ static void guest_main(void) {
         if (m->init) { LOG("%s: DT_INIT +%#llx", m->name, m->init); ((fn0)(m->base + m->init))(); }
         if (m->init_array && m->init_array_sz) {   // .init_array 静态构造：日志 sink/类注册此前全部缺跑
             uint64_t n = m->init_array_sz / 8;
+            static int reg_bad;
             for (uint64_t k = 0; k < n; k++) {
                 uint64_t fn = *(uint64_t *)(m->base + m->init_array + k * 8);   // 槽已被 RELATIVE 重定位成绝对地址
                 ((fn0)fn)();
+                if (!strcmp(m->name, "main") && !reg_bad) {   // 定位污染构造器：首次变坏即报（fn-基址=图像偏移）
+                    uint64_t b = (uint64_t)m->base;
+                    uint64_t cnt = *(uint64_t *)(b + 0x2c8f3a0);
+                    uint64_t lim = cnt > 64 ? 64 : cnt;
+                    for (uint64_t i = 0; i < lim; i++) {
+                        uint64_t v = *(uint64_t *)(b + 0x2c8f420 + i * 8);
+                        if (!(v >= b && v < b + (uint64_t)m->size)) {
+                            reg_bad = 1;
+                            LOG("★ 污染出现在 main 构造器 #%llu（fn=main+%#llx）：坏项[%llu]=%#llx",
+                                (unsigned long long)k, (unsigned long long)(fn - b),
+                                (unsigned long long)i, (unsigned long long)v);
+                            break;
+                        }
+                    }
+                }
             }
             LOG("%s: init_array %llu 项已执行", m->name, (unsigned long long)n);
             char tag[32]; snprintf(tag, sizeof tag, "init后:%s", m->name); nvn_reg_probe(tag);
