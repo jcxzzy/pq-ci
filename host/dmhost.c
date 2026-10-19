@@ -1007,7 +1007,9 @@ static uint32_t h_getentrytype(int32_t *out, const char *path) {
     if (host_path(path, hp, sizeof hp) < 0) { LOG("GetEntryType(%s) 未挂载 ← %p", path, __builtin_return_address(0)); return FS_ENOENT; }
     struct stat st;
     if (stat(hp, &st)) { LOG("GetEntryType(%s) stat 失败 errno=%d ← %p", path, errno, __builtin_return_address(0)); return FS_ENOENT; }
-    *out = S_ISDIR(st.st_mode) ? 1 : 0;   // 本 SDK 的 DirectoryEntryType：1=目录 0=文件（il2cpp GetFileAttributes 映射反汇编实证；2 是非法值会触发断言）
+    *out = S_ISDIR(st.st_mode) ? 0 : 1;   // HOS DirectoryEntryType：0=目录 1=文件（libnx FsEntryType 与 d2r-mobile hle_fs.c ENT_DIR=0 双实证。
+    //   原先按 1=目录 0=文件回——所有文件被报成目录，il2cpp System.IO 的 File 路径在
+    //   Load Manifest 阶段抛 UnauthorizedAccessException（CI 实测 __cxa_throw 现场捕获），已反转为正确语义）
     LOG("GetEntryType(%s) → type=%d", path, *out);
     if (strstr(path, "globalgamemanagers") || strstr(path, "data.unity3d")) {
         // GGM 发现阶段：打印客体调用链，定位静默退出的决策方（零扰动，复用 fault.c 帧链回溯）
@@ -1053,12 +1055,13 @@ static uint32_t h_readdirectory(int64_t *out, void *ents, uint64_t h, int64_t ma
         struct dirent *de = readdir(g_dh[h].d);
         if (!de) break;
         if (de->d_name[0] == '.') continue;
-        int want = (de->d_type == DT_DIR) ? 1 : 0;   // 1=目录 0=文件
+        int isdir = de->d_type == DT_DIR;
+        int want = isdir ? 2 : 1;   // nn::fs::OpenDirectoryMode：File=1 Directory=2（实测调用均 mode=3=All）
         if (g_dh[h].mode && !(g_dh[h].mode & want) && g_dh[h].mode != 3) continue;
         uint8_t *slot = e + (size_t)cnt * 0x310;
         memset(slot, 0, 0x310);
         strlcpy((char *)slot, de->d_name, 0x301);
-        *(int32_t *)(slot + 0x304) = want;   // 1=目录 0=文件（同 GetEntryType）
+        *(int32_t *)(slot + 0x304) = isdir ? 0 : 1;   // DirectoryEntryType：0=目录 1=文件（同 GetEntryType）
         *(int64_t *)(slot + 0x308) = 0;
         struct stat st;
         if (de->d_type != DT_DIR && fstatat(dirfd(g_dh[h].d), de->d_name, &st, 0) == 0)
