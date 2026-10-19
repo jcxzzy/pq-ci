@@ -184,7 +184,19 @@ static thr_t *g_thr_all;
 static thr_t *g_thr_main;
 static __thread thr_t *t_cur;
 extern void dm_thread_enter(uint64_t, uint64_t, uint64_t);
-void dm_thread_returned(void) { die("客体线程入口返回（须经 ExitThread 退出）"); }
+// 工作线程入口返回：真机上线程经 ExitThread 退出；Unity 部分辅助线程会返回——
+// 停在本线程（不影响主循环），而非终止进程
+static void thread_park_forever(const char *why) {
+    static pthread_mutex_t pm = PTHREAD_MUTEX_INITIALIZER;
+    static pthread_cond_t pc = PTHREAD_COND_INITIALIZER;
+    pthread_mutex_lock(&pm);
+    for (;;) pthread_cond_wait(&pc, &pm);
+    (void)why;
+}
+void dm_thread_returned(void) {
+    LOG("客体线程入口返回（h=%#x）→ 永久驻留", t_cur ? t_cur->handle : 0);
+    thread_park_forever("returned");
+}
 void guest_thread_init(void);
 
 static uint32_t h_alloc(int type, void *obj) {
@@ -488,6 +500,10 @@ static uint64_t svc_impl(int num, uint64_t *x) {
         if (reason & 1) return 0;   // BreakReason_Debug：仅停一下，继续
         void guest_backtrace(uint64_t);
         guest_backtrace(x[29]);     // 从门保存的客体 fp 走帧链（包装函数无栈帧）
+        if (t_cur && t_cur != g_thr_main) {   // 工作线程的致命 Break：驻留该线程，主循环继续
+            LOG("（工作线程 Break → 永久驻留）");
+            thread_park_forever("break");
+        }
         _exit(81);
     }
     case 39: {  // OutputDebugString(ptr, len)：打出客体自己的诊断文本
