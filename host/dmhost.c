@@ -861,6 +861,7 @@ static uint64_t h_not_packed(void *self, void *fs) {
     (void)self; (void)fs;
     return 0;   // vt+0xa0：不是打包归档——按本地松散文件处理（真机 ROM 归档语义）
 }
+static void nvn_reg_probe(const char *tag);
 static void ensure_fake_archive(void) {
     if (g_fake_installed) return;
     uint64_t *mslot = (uint64_t *)(g_mod[0].base + 0x2c77850);
@@ -876,6 +877,7 @@ static void ensure_fake_archive(void) {
     g_fake_list[0] = (uint64_t)(uintptr_t)g_fake_obj;
     *(uint64_t *)(mgr + 0x20) = (uint64_t)(uintptr_t)g_fake_list;   // 列表空（计数 0），直接接管
     *(uint64_t *)(mgr + 0x30) = 1;
+    nvn_reg_probe("伪归档插入");
     g_fake_installed = 1;
     LOG("伪归档已插入管理器：obj=%p vt 克隆自 %#llx（仅 vt+0xa0→恒假），列表=%p 计数=1",
         (void *)g_fake_obj, (unsigned long long)fvt, (void *)g_fake_list);
@@ -1314,7 +1316,23 @@ static uint32_t n_cb_addctl(void *c, void *m, uint64_t n) { (void)c; (void)m; (v
 static uint32_t n_cb_setpool(void *c, void *pool, int64_t off) { (void)c; (void)pool; (void)off; return 0; }   // SetTexturePool/SetSamplerPool/SetShaderScratchMemory
 static uint32_t n_cb_fence(void *c, void *s, int f) { (void)c; (void)s; (void)f; return 0; }   // FenceSync/WaitSync
 // —— 贴图/采样器/缓冲描述符池（对象：magic@0 pool@8 off@16 count@24）
+// 0x2c8f390 注册表污染探针：entry0(=0x2c8f420) 应为模块内静态对象指针；
+// 图形初始化期被 float2(1,1) 覆写 → 0x10506a0 崩。按里程碑采样夹出写者。
+static void nvn_reg_probe(const char *tag) {
+    uint64_t b = (uint64_t)g_mod[0].base;
+    uint64_t v = *(uint64_t *)(b + 0x2c8f420);
+    LOG("[reg探针·%s] entry0=%#llx %s 计数=%llu",
+        tag, (unsigned long long)v,
+        (v >= b && v < b + (uint64_t)g_mod[0].size) ? "模块内✓" : "被污染!",
+        (unsigned long long)*(uint64_t *)(b + 0x2c8f3a0));
+}
+static uint64_t h_writetexels(void *t, void *r) {   // 顺带在崩溃前最后一个 NVN 调用点探针
+    (void)t; (void)r;
+    nvn_reg_probe("WriteTexels");
+    return 0;
+}
 static uint32_t n_tpool_init(void *tp, void *pool, int64_t off, int32_t count) {
+    nvn_reg_probe("TexturePool");
     *(uint32_t *)tp = NVN_MAGIC('T', 'P', 'O', 'L');
     *(void **)((uint8_t *)tp + 8) = pool;
     *(uint64_t *)((uint8_t *)tp + 16) = (uint64_t)off;
@@ -1471,6 +1489,8 @@ static void *h_nvn_bootstrap(const char *name) {
         {"nvnSamplerPoolRegisterSamplerBuilder", (void *)n_tpool_register},
         // 纹理 / 视图 / 采样器（d2r-mobile 移植：字段记账 + Tegra X1 块线性布局真算）
         {"nvnTextureBuilderSetDefaults", (void *)n_tb_defaults},
+        {"nvnTextureWriteTexels", (void *)h_writetexels},
+        {"nvnTextureFlushTexels", (void *)h_writetexels},
         {"nvnTextureBuilderSetDevice", (void *)n_tb_setdev},
         {"nvnTextureBuilderSetFlags", (void *)n_tb_setflags},
         {"nvnTextureBuilderSetTarget", (void *)n_tb_settarget},
