@@ -1575,7 +1575,11 @@ static uint32_t n_win_init2(void *w, const void *b) {
     *(void **)((uint8_t *)w + 8) = *(void *const *)b;
     *(uint32_t *)((uint8_t *)w + 16) = *(const uint32_t *)((const uint8_t *)b + 16);
     *(void **)((uint8_t *)w + 24) = *(void *const *)((const uint8_t *)b + 8);
-    LOG("nvn WindowInitialize %p dev=%p nw=%p ← %p", w, *(void *const *)b, *(void *const *)((const uint8_t *)b + 8), NVN_CALLER);
+    *(void **)((uint8_t *)w + 32) = *(void *const *)((const uint8_t *)b + 24);   // builder 的纹理表/数量
+    *(uint32_t *)((uint8_t *)w + 40) = *(const uint32_t *)((const uint8_t *)b + 32);
+    LOG("nvn WindowInitialize %p dev=%p nw=%p texs=%p n=%u ← %p", w, *(void *const *)b,
+        *(void *const *)((const uint8_t *)b + 8), *(void *const *)((const uint8_t *)b + 24),
+        *(const uint32_t *)((const uint8_t *)b + 32), NVN_CALLER);
     return 1;
 }
 static uint32_t n_win_finalize(void *w) { *(uint32_t *)w = 0; return 0; }
@@ -1583,7 +1587,21 @@ static void *n_win_getnw(void *w) { return *(void **)((uint8_t *)w + 24); }
 static uint32_t n_win_interval_get(void *w) { return *(uint32_t *)((uint8_t *)w + 16); }
 static uint32_t n_win_interval_set(void *w, uint32_t i) { *(uint32_t *)((uint8_t *)w + 16) = i; return 0; }
 static uint32_t n_win_crop(void *w, int32_t l, int32_t t, int32_t r, int32_t b2) { (void)w; (void)l; (void)t; (void)r; (void)b2; return 0; }
-static uint32_t n_win_acquire(void *w, void **tex, void *sema) { (void)w; (void)sema; if (tex) *tex = NULL; return 0; }
+// 呈现语义（无 GPU 阶段的帧节拍器）：AcquireTexture 恒成功、在窗口的纹理表里轮转；
+// PresentTexture 推进轮转下标；SubmitCommands 记账放行。Unity 的帧循环由此不再退避死等。
+static uint32_t n_win_acquire(void *w, void **tex, void **sema) {
+    void **texs = *(void ** *)((uint8_t *)w + 32);
+    uint32_t n = *(uint32_t *)((uint8_t *)w + 40);
+    if (sema) *sema = NULL;
+    if (tex) *tex = (texs && n) ? texs[*(uint32_t *)((uint8_t *)w + 44) % n] : NULL;
+    return 1;
+}
+static uint32_t n_queue_present(void *q, void *w, void *tex, void *sema) {
+    (void)q; (void)tex; (void)sema;
+    if (w) (*(uint32_t *)((uint8_t *)w + 44))++;
+    return 0;
+}
+static uint32_t n_queue_submit(void *q, int n, void *const *cmds) { (void)q; (void)n; (void)cmds; return 0; }
 static uint32_t n_win_label(void *w, const char *s) { (void)w; (void)s; return 0; }
 // —— 同步等待：立即可通过（引导期没有真 GPU 时序）
 static uint32_t n_sync_wait(void *s, int64_t timeout) { (void)s; (void)timeout; return 1; }
@@ -1708,6 +1726,8 @@ static void *h_nvn_bootstrap(const char *name) {
         {"nvnQueueGetTotalComputeMemoryUsed", (void *)n_queue_totalmem},
         {"nvnQueueGetTotalControlMemoryUsed", (void *)n_queue_totalmem},
         {"nvnQueueResetMemoryUsageCounts", (void *)n_queue_resetcounts},
+        {"nvnQueueSubmitCommands", (void *)n_queue_submit},
+        {"nvnQueuePresentTexture", (void *)n_queue_present},
         // 内存池
         {"nvnMemoryPoolBuilderSetDefaults", (void *)n_pb_setdefaults},
         {"nvnMemoryPoolBuilderSetDevice", (void *)n_pb_setdevice},
