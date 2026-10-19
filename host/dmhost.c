@@ -636,6 +636,19 @@ typedef struct { char name[16]; uint8_t *base; size_t size; } mod_ref_t;
 void diag_install(void);
 mod_ref_t g_mod_ref[MAX_MOD];
 int g_nmod_ref;
+// 宿主移交登记：凡把宿主进程地址交给客体使用的对象（argv/假原生窗口/克隆 vtable…），
+// 建立时登记；fault.c 崩溃时据此把寄存器里的宿主指针归属到具体对象（诊断宿主指针泄漏）。
+typedef struct { const char *name; const void *lo, *hi; } handout_t;
+handout_t g_handout[12];
+int g_nhandout;
+void handout_reg(const char *name, const void *lo, size_t n) {
+    if (g_nhandout < 12) {
+        g_handout[g_nhandout].name = name;
+        g_handout[g_nhandout].lo = lo;
+        g_handout[g_nhandout].hi = (const char *)lo + n;
+        g_nhandout++;
+    }
+}
 
 // ---------- 服务层初始化按名接管（d2r-mobile hle_sdkinit.c 配方）----------
 // nninitInitializeSdkModule 调的各服务初始化在真机上连 Horizon 系统服务（IPC），
@@ -973,8 +986,6 @@ static uint32_t h_flushfile(uint64_t h) { (void)h; return 0; }
 // 修复：把回退 vtable 整体克隆、仅 vt+0xa0 改为恒假（=真机 ROM 归档的语义：一切按松散文件），
 // 插入列表尾部。其余槽（Read=nn::fs::ReadFile 直通、枚举、路径 getter"rom:/"）克隆即正确。
 static uint64_t g_fake_vt[0x180 / 8];
-static uint64_t g_fake_obj[16];
-static uint64_t g_fake_list[4];
 static int g_fake_installed;
 static uint64_t h_not_packed(void *self, void *fs) {
     (void)self; (void)fs;
@@ -991,15 +1002,15 @@ static void ensure_fake_archive(void) {
     uint64_t fvt = *(uint64_t *)fb;
     memcpy(g_fake_vt, (void *)fvt, sizeof g_fake_vt);
     g_fake_vt[0xa0 / 8] = (uint64_t)(uintptr_t)h_not_packed;
-    memset(g_fake_obj, 0, sizeof g_fake_obj);
-    g_fake_obj[0] = (uint64_t)(uintptr_t)g_fake_vt;
-    g_fake_list[0] = (uint64_t)(uintptr_t)g_fake_obj;
-    *(uint64_t *)(mgr + 0x20) = (uint64_t)(uintptr_t)g_fake_list;   // 列表空（计数 0），直接接管
-    *(uint64_t *)(mgr + 0x30) = 1;
-    nvn_reg_probe("伪归档插入");
+    // 身份保持版：不往管理器插新对象（新对象是宿主指针，曾以归档指针为键的注册表查不到 →
+    // Load Manifest 后 null 解引用崩溃），而是把回退对象自己的 vtable 换成克隆表——
+    // 对象地址不变（游戏此前缓存的就是它），仅 vt+0xa0 的行为变化。
+    *(uint64_t *)fb = (uint64_t)(uintptr_t)g_fake_vt;
+    handout_reg("伪归档克隆vt", g_fake_vt, sizeof g_fake_vt);
+    nvn_reg_probe("伪归档vt换装");
     g_fake_installed = 1;
-    LOG("伪归档已插入管理器：obj=%p vt 克隆自 %#llx（仅 vt+0xa0→恒假），列表=%p 计数=1",
-        (void *)g_fake_obj, (unsigned long long)fvt, (void *)g_fake_list);
+    LOG("伪归档（身份保持）：回退对象 %#llx 的 vt %#llx → 克隆 %p（仅 +0xa0→恒假），列表/计数不动",
+        (unsigned long long)fb, (unsigned long long)fvt, (void *)g_fake_vt);
 }
 static uint32_t h_getentrytype(int32_t *out, const char *path) {
     ensure_fake_archive();   // 管理器构造后的第一个 fs 时机插入伪归档
@@ -1094,6 +1105,7 @@ static uint32_t h_vi_getnativewindow(void **out, void *layer) {   // 假 native 
     (void)layer;
     static uint8_t g_fake_nw[0x1000];
     if (out) *out = g_fake_nw;
+    handout_reg("假原生窗口", g_fake_nw, sizeof g_fake_nw);
     return 0;
 }
 // ---------- NVN 接口层（d2r hle_nvn.c 的最小起点） ----------
@@ -2182,6 +2194,9 @@ int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: dmhost <产物目录> [模块…]\n"); return 2; }
     strlcpy(g_outdir, argv[1], sizeof g_outdir);
     diag_install();
+    handout_reg("宿主映像锚点", (const char *)main - 0x400000, 0x800000);   // 粗范围：二进制+邻接堆的归属线索
+    handout_reg("guest_argv", g_guest_argv, sizeof g_guest_argv);
+    handout_reg("arg0串", g_arg0, sizeof g_arg0);
     alarm(600);   // CI 看门狗：资产装载阶段耗时（192MB 池 + Unity 资源解析），10 分钟；workflow 上限 15 分钟
     const char *names[MAX_MOD]; int n = 0;
     for (int i = 2; i < argc && n < MAX_MOD; i++) names[n++] = argv[i];
