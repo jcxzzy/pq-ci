@@ -1,6 +1,7 @@
 // 崩溃现场转储（独立编译单元：ucontext.h 在 macOS 需要 _XOPEN_SOURCE，
 // 放这里定义避免影响主文件的符号可见性）。
 #define _XOPEN_SOURCE 700
+#include <dlfcn.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -23,6 +24,11 @@ static void where_of(uint64_t a, char *out, size_t n) {
         uint64_t b = (uint64_t)g_mod_ref[j].base;
         if (a >= b && a < b + g_mod_ref[j].size) { snprintf(out, n, "%s+%#llx", g_mod_ref[j].name, (unsigned long long)(a - b)); return; }
     }
+    Dl_info di;   // 宿主映像/系统库：符号名解析（HLE 桩崩溃定位的关键）
+    if (dladdr((void *)a, &di) && di.dli_sname)
+        { snprintf(out, n, "%s+%#llx", di.dli_sname, (unsigned long long)(a - (uint64_t)di.dli_saddr)); return; }
+    if (di.dli_fname)
+        { snprintf(out, n, "%s+%#llx", di.dli_fname, (unsigned long long)(a - (uint64_t)di.dli_fbase)); return; }
     snprintf(out, n, "非模块区");
 }
 
