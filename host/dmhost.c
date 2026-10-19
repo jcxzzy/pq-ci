@@ -470,13 +470,20 @@ static uint64_t svc_impl(int num, uint64_t *x) {
     }
     case 25: return 0;                        // CancelSynchronization：全局广播下天然可重试
     case 26: {  // ArbitrateLock(owner_h, x1 锁地址, w2 标签)：等锁归零后原子占为己有
+        // HOS 协议（d2r 0x1A 同款）：争用时置 WAITERS_BIT(0x40000000)——持有者的用户态
+        // 解锁 CAS 因此失败、改走 svc#27 广播唤醒。原先只睡等广播：用户态快速解锁
+        // 不广播 → 漏唤醒 → 并行装载期随机楔死（主/工线程双双卡 svc#26/28）。
         volatile uint32_t *m = (volatile uint32_t *)(uintptr_t)x[1];
         uint32_t tag = (uint32_t)x[2];
         pthread_mutex_lock(&G);
         for (;;) {
             uint32_t v = *m;
-            if (v == 0 && __sync_bool_compare_and_swap(m, 0, tag)) break;
-            pthread_cond_wait(&GV, &G);   // 假醒无害：醒来重查锁字
+            if (!v && __sync_bool_compare_and_swap(m, 0, tag)) break;
+            if (!(v & 0x40000000u)) __sync_fetch_and_or(m, 0x40000000u);
+            struct timespec ts = {0, 500000};   // 0.5ms 防御轮询：漏广播也能前进
+            pthread_mutex_unlock(&G);
+            nanosleep(&ts, NULL);
+            pthread_mutex_lock(&G);
         }
         pthread_mutex_unlock(&G);
         return 0;
