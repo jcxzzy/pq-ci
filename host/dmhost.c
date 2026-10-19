@@ -1562,7 +1562,7 @@ static uint32_t n_wb_setdefaults(void *b) { memset(b, 0, 0x40); return 0; }
 static uint32_t n_wb_setdevice(void *b, void *d) { *(void **)b = d; return 0; }
 static uint32_t n_wb_setnw(void *b, void *nw) { *(void **)((uint8_t *)b + 8) = nw; return 0; }
 static uint32_t n_wb_setinterval(void *b, uint32_t i) { *(uint32_t *)((uint8_t *)b + 16) = i; return 0; }
-static uint32_t n_wb_settextures(void *b, void *const *texs, uint32_t n) {
+static uint32_t n_wb_settextures(void *b, uint32_t n, void *const *texs) {   // NVN 签名：数量在前（实证：x1=3、x2=指针）
     *(void **)((uint8_t *)b + 24) = (void *)texs;
     *(uint32_t *)((uint8_t *)b + 32) = n;
     return 0;
@@ -1593,7 +1593,7 @@ static uint32_t n_win_acquire(void *w, void **tex, void **sema) {
     void **texs = *(void ** *)((uint8_t *)w + 32);
     uint32_t n = *(uint32_t *)((uint8_t *)w + 40);
     if (sema) *sema = NULL;
-    if (tex) *tex = (texs && n) ? texs[*(uint32_t *)((uint8_t *)w + 44) % n] : NULL;
+    if (tex) *tex = (texs && n >= 1 && n <= 8 && ptr_readable(texs)) ? texs[*(uint32_t *)((uint8_t *)w + 44) % n] : NULL;
     return 1;
 }
 static uint32_t n_queue_present(void *q, void *w, void *tex, void *sema) {
