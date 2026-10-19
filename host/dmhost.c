@@ -1909,7 +1909,7 @@ static void guest_main(void) {
     LOG(">>> nninitInitializeSdkModule"); ((fn0)req("nninitInitializeSdkModule"))();
     LOG(">>> nninitStartup"); ((fn0)req("nninitStartup"))();
     ((fn0)req("_init_libc2"))();
-    for (int i = 0; i < g_nmod; i++) {   // rtld 回调 B：各模块 DT_INIT（全局构造）
+    for (int i = g_nmod - 1; i >= 0; i--) {   // rtld 回调 B：依赖序（sdk/subsdk0 先、main 后）——真机 rtld 依赖先初始化
         module_t *m = &g_mod[i];
         if (m->init) { LOG("%s: DT_INIT +%#llx", m->name, m->init); ((fn0)(m->base + m->init))(); }
         if (m->init_array && m->init_array_sz) {   // .init_array 静态构造：日志 sink/类注册此前全部缺跑
