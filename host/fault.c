@@ -25,7 +25,7 @@ static void where_of(uint64_t a, char *out, size_t n) {
 // 帧链回溯（x29 链），最多 8 层：LR 归属到模块。供 fault_dump 与 svc Break 共用。
 void guest_backtrace(uint64_t fp) {
     uint64_t f = fp;
-    for (int i = 0; i < 8 && f; i++) {
+    for (int i = 0; i < 24 && f; i++) {
         uint64_t nxt = *(uint64_t *)f, ret = *(uint64_t *)(f + 8);
         char w2[64] = "";
         where_of(ret, w2, sizeof w2);
