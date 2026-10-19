@@ -1320,11 +1320,20 @@ static uint32_t n_cb_fence(void *c, void *s, int f) { (void)c; (void)s; (void)f;
 // 图形初始化期被 float2(1,1) 覆写 → 0x10506a0 崩。按里程碑采样夹出写者。
 static void nvn_reg_probe(const char *tag) {
     uint64_t b = (uint64_t)g_mod[0].base;
-    uint64_t v = *(uint64_t *)(b + 0x2c8f420);
-    LOG("[reg探针·%s] entry0=%#llx %s 计数=%llu",
-        tag, (unsigned long long)v,
-        (v >= b && v < b + (uint64_t)g_mod[0].size) ? "模块内✓" : "被污染!",
-        (unsigned long long)*(uint64_t *)(b + 0x2c8f3a0));
+    uint64_t cnt = *(uint64_t *)(b + 0x2c8f3a0);
+    if (cnt > 64) cnt = 64;
+    static uint64_t last_bad;
+    for (uint64_t i = 0; i < cnt; i++) {
+        uint64_t v = *(uint64_t *)(b + 0x2c8f420 + i * 8);
+        if (!(v >= b && v < b + (uint64_t)g_mod[0].size)) {
+            uint64_t sig = i * 0x1000000000ull + (v & 0xffffffffff);
+            if (sig != last_bad) {
+                last_bad = sig;
+                LOG("[reg探针·%s] 坏项[%llu]=%#llx（计数 %llu）", tag, (unsigned long long)i, (unsigned long long)v, (unsigned long long)cnt);
+            }
+            return;
+        }
+    }
 }
 static uint64_t h_writetexels(void *t, void *r) {   // 顺带在崩溃前最后一个 NVN 调用点探针
     (void)t; (void)r;
