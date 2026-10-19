@@ -792,6 +792,19 @@ static void mgstr_decode(uint64_t s, char *dst, size_t cap) {   // 托管 string
     dst[k] = '\0';
 }
 static void (*g_real_cxa_throw)(void *, void *, void *);
+// 托管异常的类型名不依赖托管 string 字段：Il2CppClass{image@0,gc@8,name@0x10,namespaze@0x18}
+static void mg_type_name(uint64_t ex, char *dst, size_t cap) {
+    dst[0] = '\0';
+    if (cap < 8) return;
+    uint64_t klass = rd64_checked((void *)(uintptr_t)ex);
+    uint64_t name = rd64_checked((void *)(uintptr_t)(klass + 0x10));
+    uint64_t ns = rd64_checked((void *)(uintptr_t)(klass + 0x18));
+    char n[96] = "", s[96] = "";
+    guest_strlcpy((const char *)(uintptr_t)name, n, sizeof n);
+    guest_strlcpy((const char *)(uintptr_t)ns, s, sizeof s);
+    if (n[0] && s[0]) snprintf(dst, cap, "%s.%s", s, n);
+    else guest_strlcpy((const char *)(uintptr_t)name, dst, cap);
+}
 static void h_cxa_throw(void *obj, void *tinfo, void *dtor) {
     if (!g_real_cxa_throw)
         for (int i = 0; i < g_nmod && !g_real_cxa_throw; i++)
@@ -803,12 +816,38 @@ static void h_cxa_throw(void *obj, void *tinfo, void *dtor) {
     }
     if (strstr(tn, "Il2CppExceptionWrapper") && ptr_readable(obj)) {
         uint64_t ex = rd64_checked(obj);   // wrapper 唯一字段：Il2CppException*
-        char cls[280] = "", msg[280] = "";
         if (ptr_readable((void *)(uintptr_t)ex)) {
-            mgstr_decode(rd64_checked((void *)(uintptr_t)(ex + 0x10)), cls, sizeof cls);   // _className
+            char type[200] = "";
+            mg_type_name(ex, type, sizeof type);   // 类型名走 Il2CppClass（不依赖 null 常见的 _className）
+            char msg[280] = "";
             mgstr_decode(rd64_checked((void *)(uintptr_t)(ex + 0x18)), msg, sizeof msg);   // _message
+            LOG("【未捕获 C# 异常】type=%s message=%s", type, msg);
+            static int dumped;
+            if (!dumped) {   // 一次性校准转储：wrapper 与异常对象头 8 槽
+                dumped = 1;
+                uint64_t wq[4];
+                for (int k = 0; k < 4; k++) wq[k] = rd64_checked((void *)((uintptr_t)obj + 8 * k));
+                LOG("  wrapper@%p：%016llx %016llx %016llx %016llx", obj,
+                    (unsigned long long)wq[0], (unsigned long long)wq[1], (unsigned long long)wq[2], (unsigned long long)wq[3]);
+                uint64_t eq[8];
+                for (int k = 0; k < 8; k++) eq[k] = rd64_checked((void *)(uintptr_t)(ex + 8 * k));
+                LOG("  ex@%#llx：%016llx %016llx %016llx %016llx %016llx %016llx %016llx %016llx",
+                    (unsigned long long)ex, (unsigned long long)eq[0], (unsigned long long)eq[1],
+                    (unsigned long long)eq[2], (unsigned long long)eq[3], (unsigned long long)eq[4],
+                    (unsigned long long)eq[5], (unsigned long long)eq[6], (unsigned long long)eq[7]);
+            }
+            for (int depth = 0; depth < 3; depth++) {   // InnerException 链（TypeInitialization 等的根因在内层）
+                uint64_t inner = rd64_checked((void *)(uintptr_t)(ex + 0x28));
+                if (!inner || !ptr_readable((void *)(uintptr_t)inner)) break;
+                ex = inner;
+                char it[200] = "", im[280] = "";
+                mg_type_name(ex, it, sizeof it);
+                mgstr_decode(rd64_checked((void *)(uintptr_t)(ex + 0x18)), im, sizeof im);
+                LOG("  ↳ Inner[%d] type=%s message=%s", depth, it, im);
+            }
+        } else {
+            LOG("【未捕获 C# 异常】wrapper=%p 但 ex=%#llx 不可读", obj, (unsigned long long)rd64_checked(obj));
         }
-        LOG("【未捕获 C# 异常】class=%s message=%s", cls, msg);
     } else if (tn[0]) {
         LOG("__cxa_throw(%p) 类型 %s", obj, tn);
     }
