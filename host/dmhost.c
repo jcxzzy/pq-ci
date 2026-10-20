@@ -313,7 +313,9 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
         // 线程入口分布（按模块+偏移分组计数）：池满/线程风暴取证
         {
             static uint64_t ent[32]; static uint32_t cnt[32]; static int nent;
+            nent = 0; for (int q = 0; q < 32; q++) cnt[q] = 0;   // 每拍重置：只统计本拍仍存活的
             for (thr_t *t = g_thr_all; t; t = t->all) {
+                if (t->exited) continue;
                 int k = 0;
                 for (; k < nent; k++) if (ent[k] == t->entry) break;
                 if (k == nent && nent < 32) { ent[nent] = t->entry; cnt[nent] = 0; nent++; }
@@ -474,6 +476,19 @@ static uint64_t svc_impl(int num, uint64_t *x) {
         thr_t *t = calloc(1, sizeof *t);
         t->entry = x[1]; t->arg = x[2]; t->stack_top = x[3];
         t->prio = (int)(int32_t)x[4]; t->core = (int)(int32_t)x[5];
+        {   // 创建点取证：前 16 个不同调用点（模块+偏移×计数）——线程风暴源头定位
+            static uint64_t seen[16]; static uint32_t cnt[16]; static int nseen;
+            uint64_t site = x[30];
+            int k = 0;
+            for (; k < nseen; k++) if (seen[k] == site) break;
+            if (k == nseen && nseen < 16) { seen[nseen] = site; nseen++; }
+            if (k < 16 && ++cnt[k] == 3) {   // 第 3 次才报：过滤一次性创建
+                const char *mn = "?"; uint64_t off = 0;
+                for (int j = 0; j < g_nmod; j++)
+                    if (site >= (uint64_t)(uintptr_t)g_mod[j].base && site < (uint64_t)(uintptr_t)g_mod[j].base + g_mod[j].size) { mn = g_mod[j].name; off = site - (uint64_t)(uintptr_t)g_mod[j].base; break; }
+                LOG("线程创建点 %s+%#llx（第 3 次）", mn, (unsigned long long)off);
+            }
+        }
         pthread_attr_t a; pthread_attr_init(&a);
         pthread_attr_setstacksize(&a, 1 << 20);   // 宿主栈只垫门框；真正的栈由 dm_thread_enter 切成客体栈
         if (pthread_create(&t->pt, &a, thread_main, t)) die("pthread_create");
