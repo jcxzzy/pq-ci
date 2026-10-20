@@ -104,7 +104,7 @@ static void watchdog(int sig) {
     (void)sig;
     fprintf(stderr, "[dm] 心跳/看门狗 第 %d 分钟（最近svc#%d）\n", wd_beats + 1, g_last_svc);
     { void dm_dump_threads(void); dm_dump_threads(); }
-    if (++wd_beats >= 10) {   // 10 分钟：CI 时限（15 分钟）前收尾
+    if (++wd_beats >= 8) {   // 8 分钟：15 分钟 job 时限内给编译+上传留余量（跑满 10 分钟曾被 job 超时砍掉上传）
         fprintf(stderr, "[dm] 看门狗最终到期\n");
         _exit(71);
     }
