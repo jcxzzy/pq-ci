@@ -265,6 +265,8 @@ static uint32_t main_thread_register(void) {
     return mt.handle;
 }
 // 线程采样（SIGUSR1）：心跳时打断各存活线程打帧链——纯用户态自旋（无 svc）的落点只有这样才能看到
+static int ptr_readable(const void *);            // 定义在文件后部（日志汇区）
+static uint64_t rd64_checked(const void *);
 static void on_thread_sample(int sig) {
     (void)sig;
     void guest_backtrace(uint64_t);
