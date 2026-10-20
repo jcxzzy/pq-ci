@@ -263,7 +263,21 @@ static uint32_t main_thread_register(void) {
     g_thr_main = &mt;
     return mt.handle;
 }
+// 线程采样（SIGUSR1）：心跳时打断各存活线程打帧链——纯用户态自旋（无 svc）的落点只有这样才能看到
+static void on_thread_sample(int sig) {
+    (void)sig;
+    void guest_backtrace(uint64_t);
+    fprintf(stderr, "[dm]   ↷ 采样 h=%#x：", t_cur ? t_cur->handle : 0);
+    guest_backtrace((uint64_t)__builtin_frame_address(0));
+}
 void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体线程的落点
+    static int sample_installed;
+    if (!sample_installed) {
+        sample_installed = 1;
+        struct sigaction ss = {0};
+        ss.sa_handler = on_thread_sample;
+        sigaction(SIGUSR1, &ss, NULL);
+    }
     pthread_mutex_lock(&G);
     int i = 0;
     for (thr_t *t = g_thr_all; t; t = t->all, i++) {
@@ -281,6 +295,8 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
         fputc('\n', stderr);
     }
     pthread_mutex_unlock(&G);
+    for (thr_t *t = g_thr_all; t; t = t->all)   // 采样放锁外：处理器的打印走 stderr
+        if (!t->exited && !t->parked) { pthread_kill(t->pt, SIGUSR1); usleep(20000); }
 }
 // 出参契约按各包装函数 svc 后指令实证（全量扫描 106 个门）：小标量一律从寄存器回——
 // 包装函数自己 str x1/w1（GetInfo 值=x1、SetHeapSize 基址=x1、句柄=w1、PageInfo=w1、
