@@ -295,8 +295,10 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
         sigaction(SIGUSR1, &ss, NULL);
     }
     pthread_mutex_lock(&G);
-    int i = 0;
-    for (thr_t *t = g_thr_all; t; t = t->all, i++) {
+    int i = 0, total = 0;
+    for (thr_t *t = g_thr_all; t; t = t->all) total++;
+    fprintf(stderr, "[dm] 线程总数 %d（只列前 40）\n", total);
+    for (thr_t *t = g_thr_all; t && i < 40; t = t->all, i++) {
         fprintf(stderr, "[dm] 线程[%d] h=%#x%s%s%s 最近svc(旧→新):", i, t->handle,
                 t == g_thr_main ? " 主" : "", t->exited ? " 已退出" : "", t->parked ? " 已驻留" : "");
         for (int k = 0; k < 8; k++) fprintf(stderr, " %d", t->hist[k]);
@@ -327,13 +329,13 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
         {
             static uint64_t ent[32]; static uint32_t cnt[32]; static int nent;
             nent = 0; for (int q = 0; q < 32; q++) cnt[q] = 0;   // 每拍重置：只统计本拍仍存活的
-            for (thr_t *t = g_thr_all; t; t = t->all) {
+            { thr_t *t = g_thr_all; for (int q = 0; t && q < 300; t = t->all, q++) {
                 if (t->exited) continue;
                 int k = 0;
                 for (; k < nent; k++) if (ent[k] == t->entry) break;
                 if (k == nent && nent < 32) { ent[nent] = t->entry; cnt[nent] = 0; nent++; }
                 if (k < 32) cnt[k]++;
-            }
+            } }
             fprintf(stderr, "[dm] 线程入口分布：");
             for (int k = 0; k < nent; k++) {
                 const char *mn = "?";
@@ -379,8 +381,9 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
         }
         fprintf(stderr, "%s\n", guard >= 6 ? "…" : "");
     }
-    for (thr_t *t = g_thr_all; t; t = t->all)   // 采样放锁外：处理器的打印走 stderr
-        if (!t->exited && !t->parked) { pthread_kill(t->pt, SIGUSR1); usleep(20000); }
+    int sampled = 0;
+    for (thr_t *t = g_thr_all; t && sampled < 10; t = t->all)   // 采样封顶 10 个存活线程
+        if (!t->exited && !t->parked) { pthread_kill(t->pt, SIGUSR1); usleep(20000); sampled++; }
 }
 // 出参契约按各包装函数 svc 后指令实证（全量扫描 106 个门）：小标量一律从寄存器回——
 // 包装函数自己 str x1/w1（GetInfo 值=x1、SetHeapSize 基址=x1、句柄=w1、PageInfo=w1、
