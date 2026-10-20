@@ -298,6 +298,24 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
         fputc('\n', stderr);
     }
     pthread_mutex_unlock(&G);
+    // 主循环状态机取证：状态字节 [main+0x2d21514]（主线程自旋判据，0x18ce79c 直读）；
+    // 线程句柄对象 *(*(main+0x2acb5d0))（0x186660c：-1=未建）；渲染线程等待的事件字
+    // （h=0x11d 卡 WaitEvent，互斥/键 0x4286e958c/0x4286e9590 由采样取得）
+    {
+        uint64_t gb = (uint64_t)(uintptr_t)g_mod[0].base;
+        uint8_t st = 0;
+        { uint64_t p = gb + 0x2d21514; if (ptr_readable((void *)(uintptr_t)p)) st = *(const uint8_t *)(uintptr_t)p; }
+        uint64_t oa = rd64_checked((void *)(uintptr_t)(gb + 0x2acb5d0));
+        uint32_t h = 0;
+        if (oa) { uint64_t o2 = rd64_checked((void *)(uintptr_t)oa); if (o2) h = (uint32_t)rd64_checked((void *)(uintptr_t)o2); }
+        fprintf(stderr, "[dm] 状态机：state514=%u 句柄对象=%#x\n", (unsigned)st, h);
+        for (thr_t *t = g_thr_all; t; t = t->all)
+            if (!t->exited && t->last_x1 && ptr_readable((void *)(uintptr_t)t->last_x1))
+                fprintf(stderr, "[dm]   h=%#x 等待键 %#llx：键字=%u 互斥字=%u\n", t->handle,
+                        (unsigned long long)t->last_x1,
+                        (unsigned)*(volatile uint32_t *)(uintptr_t)t->last_x1,
+                        t->last_x0 ? (unsigned)*(volatile uint32_t *)(uintptr_t)t->last_x0 : 0u);
+    }
     // 主循环分发链转储（自旋楔死取证）：头 = *(*(main+0x2d20210))，节点 {next@0, type@8,
     // 字段@0x10/0x18, 回调@0x38, 参@0x40}——循环体 0x185d6e4 按类型调 0x185d74c / 0x185d980
     {
