@@ -62,6 +62,13 @@ static uint8_t g_stub_seen[MAX_STUB];
 extern uint8_t unimpl_stubs[MAX_STUB][8];
 
 uint64_t unimpl_c(unsigned idx, uint64_t *regs) {
+    // OBR1_ 前缀站点：恒回 1（原被调方语义「查中=1」）——替代 bl 站点、保留后续指令
+    if (!strncmp(g_stub_name[idx], "OBR1_", 5)) {
+        if (!g_stub_seen[idx]++)
+            LOG("OBR1 强制查中 %s（x0=%#llx x1=%#llx x2=%#llx）", g_stub_name[idx] + 5,
+                (unsigned long long)regs[0], (unsigned long long)regs[1], (unsigned long long)regs[2]);
+        return 1;
+    }
     if (!g_stub_seen[idx]++) {
         LOG("UNIMPL %s (x0=%#llx x1=%#llx)", g_stub_name[idx], (unsigned long long)regs[0], (unsigned long long)regs[1]);
         // OBSS_ 前缀站点：把 x1 当 C 串打印（观测传给回退读取的路径）
@@ -83,6 +90,12 @@ uint64_t unimpl_c(unsigned idx, uint64_t *regs) {
                 fprintf(stderr, " +%#x:%#llx", o, (unsigned long long)v);
             }
             fputc('\n', stderr);
+        }
+        // OBR1_ 前缀站点：强制回 1（原被调方语义「查中=1」）——替代 bl 站点、保留后续指令
+        if (!strncmp(g_stub_name[idx], "OBR1_", 5)) {
+            LOG("OBR1 强制查中 %s（x0=%#llx x1=%#llx x2=%#llx）", g_stub_name[idx] + 5,
+                (unsigned long long)regs[0], (unsigned long long)regs[1], (unsigned long long)regs[2]);
+            return 1;
         }
     }
     return 0;
@@ -2251,6 +2264,10 @@ static void register_gates(module_t *m, const char *dir) {
 static const struct { uint64_t off; const char *name; } g_obs_sites[] = {
     // AddArchive 拿到的归档：x23=0xc17c58 的返回（回退对象 vs 真归档）
     { 0, 0 },   // 已证：AddArchive 委派回退"Local"对象是设计行为（Matches 恒真），诊断门清空
+    // 延迟释放分发链的池查找（main+0x185d710 bl 0x185d980）：真机上由驱动侧完成记录填充
+    // 注册表（main+0x2d20200 {array,count}），宿主 NVN 桩不写它 → 永远查不中 → 分发链冻结
+    // → C# 异步操作不完成 → 主线程自旋 + 渲染线程等信号。强制「查中」验证该因果链。
+    { 0x185d710, "OBR1_defer_pool_lookup" },
 };
 static void obs_patch(module_t *m) {
     if (strcmp(m->name, "main")) return;
@@ -2272,8 +2289,9 @@ static void obs_patch(module_t *m) {
         int64_t delta = (int64_t)((uint8_t *)&unimpl_stubs[k] - (m->base + off)) / 4;
         if (delta < -(1 << 25) || delta >= (1 << 25)) die("观测门超出 bl 范围 %s", g_obs_sites[i].name);
         code[0] = 0x94000000u | (uint32_t)(delta & 0x3ffffff);
-        // nop 一条垫着（桩返回后落到下一条原指令位置继续；观测是有扰的，够定位分支边）
-        code[1] = 0xd503201fu;
+        // 原指令本身是 bl（0x94/0x97）时是「替换被调方」——天然非破坏，不得 nop 下一条；
+        // 其余站点（观测边）保持 nop 垫位。0x185d710 的 OBR1 门靠此保住后续 cmp w0,#1。
+        if ((orig0 & 0x7C000000) != 0x14000000) code[1] = 0xd503201fu;
         LOG("观测门 %s @ main+%#llx（原指令 %#x）", g_obs_sites[i].name, (unsigned long long)off, orig0);
     }
 }
