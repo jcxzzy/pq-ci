@@ -478,18 +478,22 @@ static uint64_t svc_impl(int num, uint64_t *x) {
         return idx >= 0 ? 0 : R_TIMEOUT;
     }
     case 25: return 0;                        // CancelSynchronization：全局广播下天然可重试
-    case 26: {  // ArbitrateLock(owner_h, x1 锁地址, w2 标签)：等锁归零后原子占为己有
-        // HOS 协议（d2r 0x1A 同款）：争用时置 WAITERS_BIT(0x40000000)——持有者的用户态
-        // 解锁 CAS 因此失败、改走 svc#27 广播唤醒。原先只睡等广播：用户态快速解锁
-        // 不广播 → 漏唤醒 → 并行装载期随机楔死（主/工线程双双卡 svc#26/28）。
+    case 26: {  // ArbitrateLock(w0=预期持有者句柄, x1 锁地址, w2 本线程标签)
+        // HOS 语义（d2r 0x1A）：仅当锁字仍 == 预期持有者（0=空闲）时等待；不符立即返回，
+        // 用户态包装重查。原先无视 x0 一律等「字变 0」——重入/已持有获取等自己的标签，
+        // 自死锁（CI 实证：主线程等 h=0x106 的锁，0x106 自己卡在 26 上等同一把锁）。
         volatile uint32_t *m = (volatile uint32_t *)(uintptr_t)x[1];
-        uint32_t tag = (uint32_t)x[2];
+        uint32_t owner = (uint32_t)x[0], tag = (uint32_t)x[2];
         pthread_mutex_lock(&G);
         for (;;) {
             uint32_t v = *m;
-            if (!v && __sync_bool_compare_and_swap(m, 0, tag)) break;
-            if (!(v & 0x40000000u)) __sync_fetch_and_or(m, 0x40000000u);
-            struct timespec ts = {0, 500000};   // 0.5ms 防御轮询：漏广播也能前进
+            if ((v & ~0x40000000u) != owner) break;   // 字已变（含已是自己标签）：按 HOS 返回
+            if (!owner) {
+                if (__sync_bool_compare_and_swap(m, 0, tag)) break;   // 预期空闲：占有
+            } else if (!(v & 0x40000000u)) {
+                __sync_fetch_and_or(m, 0x40000000u);   // 预期他人持有：标等待位，持有者解锁走 svc#27
+            }
+            struct timespec ts = {0, 500000};   // 0.5ms 防御轮询
             pthread_mutex_unlock(&G);
             nanosleep(&ts, NULL);
             pthread_mutex_lock(&G);
