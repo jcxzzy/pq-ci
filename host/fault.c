@@ -102,12 +102,12 @@ static void fault_dump(int sig, siginfo_t *si, void *uc_) {
 static int wd_beats;
 static void watchdog(int sig) {
     (void)sig;
-    fprintf(stderr, "[dm] 心跳/看门狗 第 %d 分钟（最近svc#%d）\n", wd_beats + 1, g_last_svc);
-    { void dm_dump_threads(void); dm_dump_threads(); }
-    if (++wd_beats >= 8) {   // 8 分钟：15 分钟 job 时限内给编译+上传留余量（跑满 10 分钟曾被 job 超时砍掉上传）
-        fprintf(stderr, "[dm] 看门狗最终到期\n");
+    if (++wd_beats > 8) {   // 判定先行：转储可能因线程数暴涨而耗时，绝不能拖过时限
+        fprintf(stderr, "[dm] 看门狗最终到期（第 %d 拍）\n", wd_beats);
         _exit(71);
     }
+    fprintf(stderr, "[dm] 心跳/看门狗 第 %d 分钟（最近svc#%d）\n", wd_beats, g_last_svc);
+    { void dm_dump_threads(void); dm_dump_threads(); }
 }
 
 static void on_host_exit(void) {
