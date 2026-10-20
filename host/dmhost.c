@@ -64,9 +64,12 @@ extern uint8_t unimpl_stubs[MAX_STUB][8];
 uint64_t unimpl_c(unsigned idx, uint64_t *regs) {
     // OBR1_ 前缀站点：恒回 1（原被调方语义「查中=1」）——替代 bl 站点、保留后续指令
     if (!strncmp(g_stub_name[idx], "OBR1_", 5)) {
-        if (!g_stub_seen[idx]++)
-            LOG("OBR1 强制查中 %s（x0=%#llx x1=%#llx x2=%#llx）", g_stub_name[idx] + 5,
+        static int obr1_said;   // 全局一次：该站点在状态机热循环百万次/分钟（曾 3 分钟 3.3GB）
+        if (!obr1_said) {
+            obr1_said = 1;
+            LOG("OBR1 强制查中 %s（x0=%#llx x1=%#llx x2=%#llx）——后续静默", g_stub_name[idx] + 5,
                 (unsigned long long)regs[0], (unsigned long long)regs[1], (unsigned long long)regs[2]);
+        }
         return 1;
     }
     if (!g_stub_seen[idx]++) {
