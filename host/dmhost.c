@@ -2112,6 +2112,12 @@ static uint64_t h_g_write(int fd, const void *p, uint64_t n) {   // 裸 write：
     if ((fd == 1 || fd == 2) && pass_allow(n)) return (uint64_t)write(fd, p, (size_t)n);
     return n;
 }
+// musl 内部输出垫片（sdk 内部直调、不经 PLT 的 write）：同样封顶直通——1.78GB 洪水实证走的是这些
+static uint64_t h_g_shim_write(void *a, void *b, uint64_t n) {
+    if (pass_allow(n)) fwrite(b, 1, (size_t)n, stderr);
+    (void)a;
+    return n;
+}
 typedef struct { const char *name; hle_fn0 fn; } hle_ent;
 static hle_fn0 force_lookup(const char *name) {
     // nnMain 开局序（main+0xbfdcdc 反汇编实证）：time::Initialize(+0x74) 连 sm IPC、
@@ -2146,6 +2152,13 @@ static hle_fn0 force_lookup(const char *name) {
         {"vfprintf", (hle_fn0)h_g_vfprintf},
         {"fwrite", (hle_fn0)h_g_fwrite},
         {"write", (hle_fn0)h_g_write},
+        {"__stdout_write", (hle_fn0)h_g_shim_write},
+        {"__stdio_write", (hle_fn0)h_g_shim_write},
+        {"__fwritex", (hle_fn0)h_g_shim_write},
+        {"__nnmusl_ConsoleWrite", (hle_fn0)h_g_shim_write},
+        {"__nnmusl_FileWrite", (hle_fn0)h_g_shim_write},
+        {"nnmem_nlib_fd_write", (hle_fn0)h_g_shim_write},
+        {"NvOsFwrite", (hle_fn0)h_g_shim_write},
         {"puts", (hle_fn0)h_g_puts},
         {"fflush", (hle_fn0)h_g_fflush},
         {"fopen", (hle_fn0)h_g_fopen},
