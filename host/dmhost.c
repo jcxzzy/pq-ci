@@ -2077,11 +2077,18 @@ static uint32_t h_hid_touchcount(int32_t *count, void *states, int32_t max) {
 }
 // 客体 stdio 直通宿主 stderr（d2r libc 直通表思路）——Unity 引擎日志因此现形，
 // 此前 musl printf 的输出被 nn-musl 的 write 垫片静默丢弃。
-static uint64_t h_g_printf(const char *fmt, ...) { va_list ap; va_start(ap, fmt); int r = vfprintf(stderr, fmt, ap); va_end(ap); return r; }
-static uint64_t h_g_fprintf(void *f, const char *fmt, ...) { (void)f; va_list ap; va_start(ap, fmt); int r = vfprintf(stderr, fmt, ap); va_end(ap); return r; }
-static uint64_t h_g_vfprintf(void *f, const char *fmt, va_list ap) { (void)f; return (uint64_t)vfprintf(stderr, fmt, ap); }
-static uint64_t h_g_fwrite(const void *p, uint64_t sz, uint64_t n, void *f) { (void)f; return (uint64_t)fwrite(p, (size_t)sz, (size_t)n, stderr); }
-static uint64_t h_g_puts(const char *s) { fputs(s ? s : "(null)", stderr); fputc('\n', stderr); return 0; }
+// ★ 直通量封顶 4MB：解楔后游戏以帧率刷无换行计数 printf（实测 8 分钟 1.78GB，
+//   撑爆 tee/上传并拖死 job）。过线静默丢（回写长度不变），游戏逻辑不受影响。
+static uint64_t g_passthru;
+static int pass_allow(uint64_t n) {
+    g_passthru += n;
+    return g_passthru < 4ull * 1024 * 1024;
+}
+static uint64_t h_g_printf(const char *fmt, ...) { va_list ap; va_start(ap, fmt); int r = pass_allow(64) ? vfprintf(stderr, fmt, ap) : 64; va_end(ap); return r; }
+static uint64_t h_g_fprintf(void *f, const char *fmt, ...) { (void)f; va_list ap; va_start(ap, fmt); int r = pass_allow(64) ? vfprintf(stderr, fmt, ap) : 64; va_end(ap); return r; }
+static uint64_t h_g_vfprintf(void *f, const char *fmt, va_list ap) { (void)f; return pass_allow(64) ? (uint64_t)vfprintf(stderr, fmt, ap) : 64; }
+static uint64_t h_g_fwrite(const void *p, uint64_t sz, uint64_t n, void *f) { (void)f; return pass_allow(sz * n) ? (uint64_t)fwrite(p, (size_t)sz, (size_t)n, stderr) : n; }
+static uint64_t h_g_puts(const char *s) { if (pass_allow(s ? strlen(s) : 6)) { fputs(s ? s : "(null)", stderr); fputc('\n', stderr); } return 0; }
 static uint64_t h_g_fflush(void *f) { (void)f; fflush(stderr); return 0; }
 // 客体 FILE 族直通宿主（带 rom:/ 路径映射）——il2cpp os 层的文件读写走客体内存
 // musl 的 fopen，其底层 write/read 在宿主必然失败；全部接到宿主后 FILE* 语义自洽。
@@ -2101,6 +2108,10 @@ static uint64_t h_g_fseek(void *f, int64_t off, int whence) { return (uint64_t)f
 static uint64_t h_g_ftell(void *f) { return (uint64_t)ftello((FILE *)f); }
 static uint64_t h_g_feof(void *f) { return (uint64_t)feof((FILE *)f); }
 static uint64_t h_g_ferror(void *f) { return (uint64_t)ferror((FILE *)f); }
+static uint64_t h_g_write(int fd, const void *p, uint64_t n) {   // 裸 write：stderr 直通、其余照回（失败回负值会走游戏重试）
+    if ((fd == 1 || fd == 2) && pass_allow(n)) return (uint64_t)write(fd, p, (size_t)n);
+    return n;
+}
 typedef struct { const char *name; hle_fn0 fn; } hle_ent;
 static hle_fn0 force_lookup(const char *name) {
     // nnMain 开局序（main+0xbfdcdc 反汇编实证）：time::Initialize(+0x74) 连 sm IPC、
@@ -2134,6 +2145,7 @@ static hle_fn0 force_lookup(const char *name) {
         {"fprintf", (hle_fn0)h_g_fprintf},
         {"vfprintf", (hle_fn0)h_g_vfprintf},
         {"fwrite", (hle_fn0)h_g_fwrite},
+        {"write", (hle_fn0)h_g_write},
         {"puts", (hle_fn0)h_g_puts},
         {"fflush", (hle_fn0)h_g_fflush},
         {"fopen", (hle_fn0)h_g_fopen},
