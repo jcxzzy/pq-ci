@@ -309,6 +309,18 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
         uint32_t h = 0;
         if (oa) { uint64_t o2 = rd64_checked((void *)(uintptr_t)oa); if (o2) h = (uint32_t)rd64_checked((void *)(uintptr_t)o2); }
         fprintf(stderr, "[dm] 状态机：state514=%u 句柄对象=%#x\n", (unsigned)st, h);
+        // 池查找注册表（0x185d980 的搜索对象）：*(global 0x2d20200) → {array@0, count@8}，
+        // 条目 16B、键在 +0（= w0|w1<<4|w2<<16）。对照分发链首节点的期望键。
+        {
+            uint64_t gb2 = (uint64_t)(uintptr_t)g_mod[0].base;
+            uint64_t ro = rd64_checked((void *)(uintptr_t)(gb2 + 0x2d20200));
+            uint64_t arr = ro ? rd64_checked((void *)(uintptr_t)ro) : 0;
+            uint64_t cnt = ro ? (rd64_checked((void *)(uintptr_t)(ro + 8)) & 0xffffffff) : 0;
+            fprintf(stderr, "[dm] 池注册表 obj=%#llx count=%llu 首键:", (unsigned long long)ro, (unsigned long long)(cnt > 64 ? 64 : cnt));
+            for (uint64_t i = 0; i < cnt && i < 8; i++)
+                fprintf(stderr, " %#x", (unsigned)(rd64_checked((void *)(uintptr_t)(arr + 16 * i)) & 0xffffffff));
+            fputc('\n', stderr);
+        }
         for (thr_t *t = g_thr_all; t; t = t->all)
             if (!t->exited && t->last_x1 && ptr_readable((void *)(uintptr_t)t->last_x1))
                 fprintf(stderr, "[dm]   h=%#x 等待键 %#llx：键字=%u 互斥字=%u\n", t->handle,
