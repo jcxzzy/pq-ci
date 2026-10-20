@@ -305,10 +305,30 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
         uint64_t gb = (uint64_t)(uintptr_t)g_mod[0].base;
         uint8_t st = 0;
         { uint64_t p = gb + 0x2d21514; if (ptr_readable((void *)(uintptr_t)p)) st = *(const uint8_t *)(uintptr_t)p; }
-        uint64_t oa = rd64_checked((void *)(uintptr_t)(gb + 0x2acb5d0));
-        uint32_t h = 0;
-        if (oa) { uint64_t o2 = rd64_checked((void *)(uintptr_t)oa); if (o2) h = (uint32_t)rd64_checked((void *)(uintptr_t)o2); }
-        fprintf(stderr, "[dm] 状态机：state514=%u 句柄对象=%#x\n", (unsigned)st, h);
+        fprintf(stderr, "[dm] 状态机：state514=%u 池[used=%u cap=%u] 句柄槽=%#x\n",
+                (unsigned)st,
+                (unsigned)(rd64_checked((void *)(uintptr_t)(gb + 0x2d21504)) & 0xffffffff),
+                (unsigned)(rd64_checked((void *)(uintptr_t)(gb + 0x2d21500)) & 0xffffffff),
+                (unsigned)(rd64_checked((void *)(uintptr_t)(gb + 0x2acb5d0)) & 0xffffffff));
+        // 线程入口分布（按模块+偏移分组计数）：池满/线程风暴取证
+        {
+            static uint64_t ent[32]; static uint32_t cnt[32]; static int nent;
+            for (thr_t *t = g_thr_all; t; t = t->all) {
+                int k = 0;
+                for (; k < nent; k++) if (ent[k] == t->entry) break;
+                if (k == nent && nent < 32) { ent[nent] = t->entry; cnt[nent] = 0; nent++; }
+                if (k < 32) cnt[k]++;
+            }
+            fprintf(stderr, "[dm] 线程入口分布：");
+            for (int k = 0; k < nent; k++) {
+                const char *mn = "?";
+                uint64_t off = 0;
+                for (int j = 0; j < g_nmod; j++)
+                    if (ent[k] >= (uint64_t)(uintptr_t)g_mod[j].base && ent[k] < (uint64_t)(uintptr_t)g_mod[j].base + g_mod[j].size) { mn = g_mod[j].name; off = ent[k] - (uint64_t)(uintptr_t)g_mod[j].base; break; }
+                fprintf(stderr, " %s+%#llx×%u", mn, (unsigned long long)off, cnt[k]);
+            }
+            fputc('\n', stderr);
+        }
         // 池查找注册表（0x185d980 的搜索对象）：*(global 0x2d20200) → {array@0, count@8}，
         // 条目 16B、键在 +0（= w0|w1<<4|w2<<16）。对照分发链首节点的期望键。
         {
