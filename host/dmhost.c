@@ -1741,8 +1741,14 @@ static uint32_t n_win_acquire(void *w, void **tex, void **sema) {
     return 1;
 }
 static uint32_t n_queue_present(void *q, void *w, void *tex, void *sema) {
-    (void)q; (void)tex; (void)sema;
+    (void)q; (void)tex;
     if (w) (*(uint32_t *)((uint8_t *)w + 44))++;
+    if (sema) {   // 呈现完成 sync：即时触发并唤醒（真机由 GPU 完成时信号）
+        *(uint32_t *)((uint8_t *)sema + 4) = 1;
+        pthread_mutex_lock(&G);
+        pthread_cond_broadcast(&GV);
+        pthread_mutex_unlock(&G);
+    }
     return 0;
 }
 static uint32_t n_queue_submit(void *q, int n, void *const *cmds) { (void)q; (void)n; (void)cmds; return 0; }
@@ -1761,7 +1767,14 @@ static uint64_t n_cb_memused(void *c) { (void)c; return 0; }
 static uint32_t n_cb_addcmd(void *c, void *m, uint64_t n) { (void)c; (void)m; (void)n; return 0; }
 static uint32_t n_cb_addctl(void *c, void *m, uint64_t n) { (void)c; (void)m; (void)n; return 0; }
 static uint32_t n_cb_setpool(void *c, void *pool, int64_t off) { (void)c; (void)pool; (void)off; return 0; }   // SetTexturePool/SetSamplerPool/SetShaderScratchMemory
-static uint32_t n_cb_fence(void *c, void *s, int f) { (void)c; (void)s; (void)f; return 0; }   // FenceSync/WaitSync
+static uint32_t n_cb_fence(void *c, void *s, int f) {   // FenceSync：无 GPU 世界即时完成——
+    (void)c; (void)f;                                    // 标记 sync 对象已触发并广播唤醒等待方
+    if (s) { *(uint32_t *)((uint8_t *)s + 4) = 1; }
+    pthread_mutex_lock(&G);
+    pthread_cond_broadcast(&GV);
+    pthread_mutex_unlock(&G);
+    return 0;
+}   // （WaitSync 走 n_sync_wait 恒通过）
 // —— 贴图/采样器/缓冲描述符池（对象：magic@0 pool@8 off@16 count@24）
 // 0x2c8f390 注册表污染探针：entry0(=0x2c8f420) 应为模块内静态对象指针；
 // 图形初始化期被 float2(1,1) 覆写 → 0x10506a0 崩。按里程碑采样夹出写者。
