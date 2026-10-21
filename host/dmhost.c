@@ -1878,6 +1878,10 @@ static uint32_t n_tex_getsamples(const void *t) { return ((const tex_t *)t)->d.s
 static uint32_t n_ms_getsamples(const void *st) { return ((const nms_t *)st)->samples; }
 static uint32_t n_ms_getenable(const void *st) { return ((const nms_t *)st)->enable; }
 static uint32_t n_co_setlogicop(void *st, int op) { ((ncolor_t *)st)->logic_op = (uint32_t)op & 0xF; return 0; }
+// —— 状态绑定族（CommandBufferBindXxxState：记录语义，绑定即生效——回放层在此生长）
+static uint32_t n_cb_bindstate(void *c, const void *st) { (void)c; (void)st; return 0; }
+static uint64_t n_buf_getsize(const void *b) { return *(const uint64_t *)((const uint8_t *)b + 0x18); }
+static void n_buf_label(void *b, const char *l) { (void)b; (void)l; }
 static uint32_t n_cb_init(void *c, void *dev) { *(uint32_t *)c = NVN_MAGIC('C', 'M', 'D', 'B'); *(void **)((uint8_t *)c + 8) = dev; LOG("nvn CommandBufferInitialize %p dev=%p ← %p", c, dev, NVN_CALLER); return 1; }
 static void *h_nvn_bootstrap(const char *name) {
     if (!name || !*name) return NULL;
@@ -2093,6 +2097,16 @@ static void *h_nvn_bootstrap(const char *name) {
         {"nvnMultisampleStateGetSamples", (void *)n_ms_getsamples},
         {"nvnMultisampleStateGetMultisampleEnable", (void *)n_ms_getenable},
         {"nvnColorStateSetLogicOp", (void *)n_co_setlogicop},
+        {"nvnCommandBufferBindBlendState", (void *)n_cb_bindstate},
+        {"nvnCommandBufferBindColorState", (void *)n_cb_bindstate},
+        {"nvnCommandBufferBindChannelMaskState", (void *)n_cb_bindstate},
+        {"nvnCommandBufferBindMultisampleState", (void *)n_cb_bindstate},
+        {"nvnCommandBufferBindPolygonState", (void *)n_cb_bindstate},
+        {"nvnCommandBufferBindDepthStencilState", (void *)n_cb_bindstate},
+        {"nvnCommandBufferBindVertexAttribState", (void *)n_cb_bindstate},
+        {"nvnCommandBufferBindVertexStreamState", (void *)n_cb_bindstate},
+        {"nvnBufferGetSize", (void *)n_buf_getsize},
+        {"nvnBufferSetDebugLabel", (void *)n_buf_label},
         {"nvnTexturePoolSetDebugLabel", (void *)n_tpool_label},
         {"nvnSamplerPoolSetDebugLabel", (void *)n_tpool_label},
         // 队列-同步
