@@ -1840,6 +1840,44 @@ static uint32_t n_sync_init(void *s, void *dev, uint32_t flags) {
 }
 // 注意：不 memset 整对象——Unity 的命令缓冲对象（实证 0xe0 字节）同时携带其他字段
 // （+0xb0=同步池包装、+0xc0=内存池），清 0x100 会抹掉它们并溢出堆 32 字节
+// —— 程序（着色器组）：Initialize 返回 NVNboolean——返回 0 曾被 Unity 判定
+// 「着色器初始化失败」，material.SetPass 报错、渲染子系统不完成（CI 实证 UNIMPL 面）
+typedef struct { uint32_t magic; void *dev; uint64_t shaders[8]; int nshaders; } prog_t;
+static uint32_t n_prog_init(void *pr, void *dev) {
+    memset(pr, 0, 0x40);
+    *(uint32_t *)pr = NVN_MAGIC('P', 'R', 'O', 'G');
+    *(void **)((uint8_t *)pr + 8) = dev;
+    return 1;   // NVNboolean：成功
+}
+static void n_prog_fin(void *pr) { *(uint32_t *)pr = 0; }
+static void n_prog_setshaders(void *pr, int n, void *const *shaders) {
+    prog_t *o = pr;
+    o->nshaders = n > 8 ? 8 : n;
+    for (int i = 0; i < o->nshaders; i++) o->shaders[i] = (uint64_t)(uintptr_t)shaders[i];
+}
+static uint64_t n_prog_getshader(const void *pr, int st) {
+    const prog_t *o = pr;
+    return (st >= 0 && st < o->nshaders) ? o->shaders[st] : 0;
+}
+static int n_prog_getcount(const void *pr) { return ((const prog_t *)pr)->nshaders; }
+static void n_prog_label(void *pr, const char *l) { (void)pr; (void)l; }
+// —— 命令录制族：句柄记账（真 Metal 回放在此层生长，先保语义放行）
+static uint64_t g_cmdh_seq;
+static void *n_cb_beginrec(void *c) { (void)c; return (void *)(uintptr_t)(0x90000000ull | ++g_cmdh_seq); }
+static void *n_cb_endrec(void *c) { (void)c; return (void *)(uintptr_t)(0x90000000ull | g_cmdh_seq); }
+static uint32_t n_cb_setrt(void *c, int n, void *const *cts, void *const *cvs, void *dt, void *dv) { (void)c; (void)n; (void)cts; (void)cvs; (void)dt; (void)dv; return 0; }
+static uint32_t n_cb_setviewport(void *c, int first, int n, const float *v) { (void)c; (void)first; (void)n; (void)v; return 0; }
+static uint32_t n_cb_setscissor(void *c, int x, int y, int w, int h) { (void)c; (void)x; (void)y; (void)w; (void)h; return 0; }
+static uint32_t n_cb_setpointsize(void *c, float v) { (void)c; (void)v; return 0; }
+static uint64_t n_cb_zculldata(void *c, void *b, uint64_t n) { (void)c; (void)b; return n; }   // Save/RestoreZCullData：回写字节数
+static uint32_t n_cb_downsample(void *c, void *dst, void *src) { (void)c; (void)dst; (void)src; return 0; }
+static uint32_t n_cb_copyt2t(void *c, void *s, void *sv, void *sr, void *d, void *dv, void *dr, int fl) { (void)c;(void)s;(void)sv;(void)sr;(void)d;(void)dv;(void)dr;(void)fl; return 0; }
+static uint32_t n_cb_label(void *c, const char *l) { (void)c; (void)l; return 0; }
+// —— 采样数读回（Unity 读自己的状态；回 0 曾是「多采样关」错读）
+static uint32_t n_tex_getsamples(const void *t) { return ((const tex_t *)t)->d.samples; }
+static uint32_t n_ms_getsamples(const void *st) { return ((const nms_t *)st)->samples; }
+static uint32_t n_ms_getenable(const void *st) { return ((const nms_t *)st)->enable; }
+static uint32_t n_co_setlogicop(void *st, int op) { ((ncolor_t *)st)->logic_op = (uint32_t)op & 0xF; return 0; }
 static uint32_t n_cb_init(void *c, void *dev) { *(uint32_t *)c = NVN_MAGIC('C', 'M', 'D', 'B'); *(void **)((uint8_t *)c + 8) = dev; LOG("nvn CommandBufferInitialize %p dev=%p ← %p", c, dev, NVN_CALLER); return 1; }
 static void *h_nvn_bootstrap(const char *name) {
     if (!name || !*name) return NULL;
@@ -2030,6 +2068,31 @@ static void *h_nvn_bootstrap(const char *name) {
         {"nvnVertexStreamStateSetDefaults", (void *)n_vs_defaults},
         {"nvnVertexStreamStateSetStride", (void *)n_vs_stride},
         {"nvnVertexStreamStateSetDivisor", (void *)n_vs_divisor},
+        // 程序 / 命令录制 / 采样读回（CI 实证 UNIMPL 面：Initialize 回 0 = 引擎判定失败）
+        {"nvnProgramInitialize", (void *)n_prog_init},
+        {"nvnProgramFinalize", (void *)n_prog_fin},
+        {"nvnProgramSetShaders", (void *)n_prog_setshaders},
+        {"nvnProgramGetShader", (void *)n_prog_getshader},
+        {"nvnProgramGetShaders", (void *)n_prog_getcount},
+        {"nvnProgramGetNumShaders", (void *)n_prog_getcount},
+        {"nvnProgramSetDebugLabel", (void *)n_prog_label},
+        {"nvnCommandBufferBeginRecording", (void *)n_cb_beginrec},
+        {"nvnCommandBufferEndRecording", (void *)n_cb_endrec},
+        {"nvnCommandBufferSetRenderTargets", (void *)n_cb_setrt},
+        {"nvnCommandBufferSetViewport", (void *)n_cb_setviewport},
+        {"nvnCommandBufferSetViewports", (void *)n_cb_setviewport},
+        {"nvnCommandBufferSetScissor", (void *)n_cb_setscissor},
+        {"nvnCommandBufferSetScissors", (void *)n_cb_setscissor},
+        {"nvnCommandBufferSetPointSize", (void *)n_cb_setpointsize},
+        {"nvnCommandBufferSaveZCullData", (void *)n_cb_zculldata},
+        {"nvnCommandBufferRestoreZCullData", (void *)n_cb_zculldata},
+        {"nvnCommandBufferDownsample", (void *)n_cb_downsample},
+        {"nvnCommandBufferCopyTextureToTexture", (void *)n_cb_copyt2t},
+        {"nvnCommandBufferSetDebugLabel", (void *)n_cb_label},
+        {"nvnTextureGetSamples", (void *)n_tex_getsamples},
+        {"nvnMultisampleStateGetSamples", (void *)n_ms_getsamples},
+        {"nvnMultisampleStateGetMultisampleEnable", (void *)n_ms_getenable},
+        {"nvnColorStateSetLogicOp", (void *)n_co_setlogicop},
         {"nvnTexturePoolSetDebugLabel", (void *)n_tpool_label},
         {"nvnSamplerPoolSetDebugLabel", (void *)n_tpool_label},
         // 队列-同步
