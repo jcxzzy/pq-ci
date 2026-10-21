@@ -1881,6 +1881,22 @@ static uint32_t n_co_setlogicop(void *st, int op) { ((ncolor_t *)st)->logic_op =
 // —— 状态绑定族（CommandBufferBindXxxState：记录语义，绑定即生效——回放层在此生长）
 static uint32_t n_cb_bindstate(void *c, const void *st) { (void)c; (void)st; return 0; }
 static uint64_t n_buf_getsize(const void *b) { return *(const uint64_t *)((const uint8_t *)b + 0x18); }
+// —— 绘制提交族（真绘制指令已到达：DrawElements/BindProgram/CopyB2T/Uniform……记录语义放行）
+static uint64_t g_texpool_seq;
+static uint64_t n_dev_gettexhandle(const void *d, const void *t, const void *s) { (void)d; (void)t; (void)s; return 0x70000000ull | ++g_texpool_seq; }
+static uint32_t n_cb_draw(void *c, int pr, int first, int n) { (void)c; (void)pr; (void)first; (void)n; return 0; }   // DrawArrays/DrawElements 共形
+static uint32_t n_cb_drawidx(void *c, int pr, int it, int n, uint64_t ib, int bv, int bi, int inst) { (void)c;(void)pr;(void)it;(void)n;(void)ib;(void)bv;(void)bi;(void)inst; return 0; }
+static uint32_t n_cb_bindprog(void *c, const void *p, int stages) { (void)c; (void)p; (void)stages; return 0; }
+static uint32_t n_cb_bindbufs(void *c, int st, int first, int n, const void *rg) { (void)c;(void)st;(void)first;(void)n;(void)rg; return 0; }
+static uint32_t n_cb_clearcolor(void *c, int i, const float *rgba, int mask) { (void)c;(void)i;(void)rgba;(void)mask; return 0; }
+static uint32_t n_cb_cleards(void *c, float d, uint32_t dm, int s, int sm) { (void)c;(void)d;(void)dm;(void)s;(void)sm; return 0; }
+static uint32_t n_cb_stencil(void *c, int f, int v) { (void)c; (void)f; (void)v; return 0; }
+static uint32_t n_cb_polyoff(void *c, float fa, float un, float cl) { (void)c;(void)fa;(void)un;(void)cl; return 0; }
+static uint32_t n_cb_barrier(void *c, int bits) { (void)c; (void)bits; return 0; }
+static uint32_t n_cb_b2t(void *c, uint64_t src, const void *t, const void *v, const void *r, int fl) { (void)c;(void)src;(void)t;(void)v;(void)r;(void)fl; return 0; }
+static uint32_t n_cb_b2b(void *c, uint64_t dst, uint64_t src, uint64_t n, int fl) { (void)c;(void)dst;(void)src;(void)n;(void)fl; return 0; }
+static uint32_t n_cb_updubo(void *c, int st, int i, const void *data, uint64_t n, uint64_t off) { (void)c;(void)st;(void)i;(void)data;(void)n;(void)off; return 0; }
+static uint32_t n_queue_label(void *q, const char *l) { (void)q; (void)l; return 0; }
 static void n_buf_label(void *b, const char *l) { (void)b; (void)l; }
 static uint32_t n_cb_init(void *c, void *dev) { *(uint32_t *)c = NVN_MAGIC('C', 'M', 'D', 'B'); *(void **)((uint8_t *)c + 8) = dev; LOG("nvn CommandBufferInitialize %p dev=%p ← %p", c, dev, NVN_CALLER); return 1; }
 static void *h_nvn_bootstrap(const char *name) {
@@ -2107,6 +2123,32 @@ static void *h_nvn_bootstrap(const char *name) {
         {"nvnCommandBufferBindVertexStreamState", (void *)n_cb_bindstate},
         {"nvnBufferGetSize", (void *)n_buf_getsize},
         {"nvnBufferSetDebugLabel", (void *)n_buf_label},
+        {"nvnDeviceGetTextureHandle", (void *)n_dev_gettexhandle},
+        {"nvnDeviceGetSamplerHandle", (void *)n_dev_gettexhandle},
+        {"nvnDeviceGetTexelFactorHandle", (void *)n_dev_gettexhandle},
+        {"nvnCommandBufferDrawArrays", (void *)n_cb_draw},
+        {"nvnCommandBufferDrawElements", (void *)n_cb_draw},
+        {"nvnCommandBufferDrawElementsBaseVertex", (void *)n_cb_drawidx},
+        {"nvnCommandBufferDrawElementsInstancedBaseVertex", (void *)n_cb_drawidx},
+        {"nvnCommandBufferDrawArraysInstanced", (void *)n_cb_drawidx},
+        {"nvnCommandBufferBindProgram", (void *)n_cb_bindprog},
+        {"nvnCommandBufferBindUniformBuffer", (void *)n_cb_bindbufs},
+        {"nvnCommandBufferBindUniformBuffers", (void *)n_cb_bindbufs},
+        {"nvnCommandBufferBindStorageBuffer", (void *)n_cb_bindbufs},
+        {"nvnCommandBufferBindStorageBuffers", (void *)n_cb_bindbufs},
+        {"nvnCommandBufferBindVertexBuffers", (void *)n_cb_bindbufs},
+        {"nvnCommandBufferClearColor", (void *)n_cb_clearcolor},
+        {"nvnCommandBufferClearDepthStencil", (void *)n_cb_cleards},
+        {"nvnCommandBufferSetStencilValueMask", (void *)n_cb_stencil},
+        {"nvnCommandBufferSetStencilMask", (void *)n_cb_stencil},
+        {"nvnCommandBufferSetStencilRef", (void *)n_cb_stencil},
+        {"nvnCommandBufferSetPolygonOffsetClamp", (void *)n_cb_polyoff},
+        {"nvnCommandBufferBarrier", (void *)n_cb_barrier},
+        {"nvnCommandBufferCopyBufferToTexture", (void *)n_cb_b2t},
+        {"nvnCommandBufferCopyTextureToBuffer", (void *)n_cb_b2t},
+        {"nvnCommandBufferCopyBufferToBuffer", (void *)n_cb_b2b},
+        {"nvnCommandBufferUpdateUniformBuffer", (void *)n_cb_updubo},
+        {"nvnQueueSetDebugLabel", (void *)n_queue_label},
         {"nvnTexturePoolSetDebugLabel", (void *)n_tpool_label},
         {"nvnSamplerPoolSetDebugLabel", (void *)n_tpool_label},
         // 队列-同步
