@@ -608,7 +608,9 @@ static uint64_t svc_impl(int num, uint64_t *x) {
             uint32_t v = *m;
             if ((v & ~0x40000000u) != owner) break;   // 字已变（含已是自己标签）：按 HOS 返回
             if (!owner) {
-                if (__sync_bool_compare_and_swap(m, 0, tag)) break;   // 预期空闲：占有
+                // 预期空闲：占有。CAS 以当前字为基——残留 WAITERS_BIT（自身竞争路径退出时
+                // 未清的位）会让 CAS(m,0,tag) 永败、主线程卡死 26 自旋（CI 实证键字=0x40000000）。
+                if (__sync_bool_compare_and_swap(m, v, tag)) break;   // v==0 或仅剩等待位都算空闲
             } else if (!(v & 0x40000000u)) {
                 __sync_fetch_and_or(m, 0x40000000u);   // 预期他人持有：标等待位，持有者解锁走 svc#27
             }
