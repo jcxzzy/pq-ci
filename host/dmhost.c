@@ -1743,7 +1743,7 @@ static uint32_t n_win_acquire(void *w, void **tex, void **sema) {
 static uint32_t n_queue_present(void *q, void *w, void *tex, void *sema) {
     (void)q; (void)tex;
     if (w) (*(uint32_t *)((uint8_t *)w + 44))++;
-    if (sema) {   // 呈现完成 sync：即时触发并唤醒（真机由 GPU 完成时信号）
+    if (sema && *(const uint32_t *)sema == NVN_MAGIC('S', 'Y', 'N', 'C')) {   // 仅自家 sync（曾无守卫误写他类对象致回归）
         *(uint32_t *)((uint8_t *)sema + 4) = 1;
         pthread_mutex_lock(&G);
         pthread_cond_broadcast(&GV);
@@ -1769,7 +1769,7 @@ static uint32_t n_cb_addctl(void *c, void *m, uint64_t n) { (void)c; (void)m; (v
 static uint32_t n_cb_setpool(void *c, void *pool, int64_t off) { (void)c; (void)pool; (void)off; return 0; }   // SetTexturePool/SetSamplerPool/SetShaderScratchMemory
 static uint32_t n_cb_fence(void *c, void *s, int f) {   // FenceSync：无 GPU 世界即时完成——
     (void)c; (void)f;                                    // 标记 sync 对象已触发并广播唤醒等待方
-    if (s) { *(uint32_t *)((uint8_t *)s + 4) = 1; }
+    if (s && *(const uint32_t *)s == NVN_MAGIC('S', 'Y', 'N', 'C')) *(uint32_t *)((uint8_t *)s + 4) = 1;   // 仅标记自家 sync（防误写他类对象）
     pthread_mutex_lock(&G);
     pthread_cond_broadcast(&GV);
     pthread_mutex_unlock(&G);
