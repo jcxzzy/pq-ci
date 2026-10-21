@@ -2296,9 +2296,10 @@ static const struct { uint64_t off; const char *name; } g_obs_sites[] = {
     // AddArchive 拿到的归档：x23=0xc17c58 的返回（回退对象 vs 真归档）
     { 0, 0 },   // 已证：AddArchive 委派回退"Local"对象是设计行为（Matches 恒真），诊断门清空
     // 延迟释放分发链的池查找（main+0x185d710 bl 0x185d980）：真机上由驱动侧完成记录填充
-    // 注册表（main+0x2d20200 {array,count}），宿主 NVN 桩不写它 → 永远查不中 → 分发链冻结
-    // → C# 异步操作不完成 → 主线程自旋 + 渲染线程等信号。强制「查中」验证该因果链。
-    { 0x185d710, "OBR1_defer_pool_lookup" },
+    // 注册表（main+0x2d20200/0x2d201f0），宿主 NVN 桩不写它 → 永远查不中 → 分发链冻结。
+    // OBR1 强制查中已证伪：回调要读条目数据，且强制使子系统状态机中止（state514 1→0）。
+    // 门撤除，回到 state=1 楔死态；下一步 = 采样 h=3 工作线程（该填注册表的执行者）。
+    { 0, 0 },
 };
 static void obs_patch(module_t *m) {
     if (strcmp(m->name, "main")) return;
