@@ -606,14 +606,14 @@ static uint64_t svc_impl(int num, uint64_t *x) {
         pthread_mutex_lock(&G);
         for (;;) {
             uint32_t v = *m;
-            if ((v & ~0x40000000u) != owner) break;   // 字已变（含已是自己标签）：按 HOS 返回
-            if (!owner) {
-                // 预期空闲：占有。CAS 以当前字为基——残留 WAITERS_BIT（自身竞争路径退出时
-                // 未清的位）会让 CAS(m,0,tag) 永败、主线程卡死 26 自旋（CI 实证键字=0x40000000）。
-                if (__sync_bool_compare_and_swap(m, v, tag)) break;   // v==0 或仅剩等待位都算空闲
-            } else if (!(v & 0x40000000u)) {
-                __sync_fetch_and_or(m, 0x40000000u);   // 预期他人持有：标等待位，持有者解锁走 svc#27
+            uint32_t own = v & ~0x40000000u;
+            if (!own) {   // 无主（0 或仅残留等待位）：直接课有——曾按「预期不符即返回」把
+                // ReleaseSemaphore 内部取锁静默丢掉（SDK 不查返回值），信号量投递丢失
+                if (__sync_bool_compare_and_swap(m, v, tag)) break;
+                continue;
             }
+            if (own != owner) break;   // 真被他者持有且与预期不符：按 HOS 返回，用户态重查
+            if (!(v & 0x40000000u)) __sync_fetch_and_or(m, 0x40000000u);   // 预期持有者仍持有：标等待位
             struct timespec ts = {0, 500000};   // 0.5ms 防御轮询
             pthread_mutex_unlock(&G);
             nanosleep(&ts, NULL);
