@@ -385,8 +385,16 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
         fprintf(stderr, "%s\n", guard >= 6 ? "…" : "");
     }
     int sampled = 0;
-    for (thr_t *t = g_thr_all; t && sampled < 10; t = t->all)   // 采样封顶 10 个存活线程
-        if (!t->exited && !t->parked) { pthread_kill(t->pt, SIGUSR1); usleep(20000); sampled++; }
+    for (thr_t *t = g_thr_all; t && sampled < 10; t = t->all) {   // 采样封顶 10 个存活：主线程优先 + 最老 9 个
+        if (t->exited || t->parked) continue;
+        if (t != g_thr_main && sampled > 0) {   // 先数一遍，跳过新线程
+            int older_live = 0;
+            for (thr_t *u = t->all; u; u = u->all)
+                if (!u->exited && !u->parked) { older_live = 1; break; }
+            if (older_live) continue;   // 有更老的存活线程：让位（新线程等下一轮心跳）
+        }
+        pthread_kill(t->pt, SIGUSR1); usleep(20000); sampled++;
+    }
 }
 // 出参契约按各包装函数 svc 后指令实证（全量扫描 106 个门）：小标量一律从寄存器回——
 // 包装函数自己 str x1/w1（GetInfo 值=x1、SetHeapSize 基址=x1、句柄=w1、PageInfo=w1、
