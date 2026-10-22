@@ -376,13 +376,15 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
         uint64_t head = gp ? rd64_checked((void *)(uintptr_t)gp) : 0;
         fprintf(stderr, "[dm] 主循环分发链 头=%#llx：", (unsigned long long)head);
         uint64_t n = head;
-        int guard = 0;
-        while (n && ptr_readable((void *)(uintptr_t)n) && guard++ < 6) {
-            fprintf(stderr, " [%#llx t=%d]", (unsigned long long)n,
-                    (int)(rd64_checked((void *)(uintptr_t)(n + 8)) & 0xffffffff));
+        uint64_t total = 0, guard = 0;
+        while (n && ptr_readable((void *)(uintptr_t)n) && guard++ < 100000) {
+            if (total < 6)
+                fprintf(stderr, " [%#llx t=%d]", (unsigned long long)n,
+                        (int)(rd64_checked((void *)(uintptr_t)(n + 8)) & 0xffffffff));
             n = rd64_checked((void *)(uintptr_t)n);
+            total++;
         }
-        fprintf(stderr, "%s\n", guard >= 6 ? "…" : "");
+        fprintf(stderr, " 共 %llu 节点%s\n", (unsigned long long)total, guard >= 100000 ? "（封顶）" : "");
     }
     int sampled = 0;
     for (thr_t *t = g_thr_all; t && sampled < 10; t = t->all) {   // 采样封顶 10 个存活：主线程优先 + 最老 9 个
