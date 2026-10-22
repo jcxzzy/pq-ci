@@ -1778,7 +1778,21 @@ static uint64_t n_cb_memused(void *c) { (void)c; return 0; }
 static uint32_t n_cb_addcmd(void *c, void *m, uint64_t n) { (void)c; (void)m; (void)n; return 0; }
 static uint32_t n_cb_addctl(void *c, void *m, uint64_t n) { (void)c; (void)m; (void)n; return 0; }
 static uint32_t n_cb_setpool(void *c, void *pool, int64_t off) { (void)c; (void)pool; (void)off; return 0; }   // SetTexturePool/SetSamplerPool/SetShaderScratchMemory
-static uint32_t n_cb_fence(void *c, void *s, int f) { (void)c; (void)s; (void)f; return 0; }   // FenceSync/WaitSync：即时信号化实验回归（广播扰动设备创建时序），回退纯桩——完成簿记待注册表方案
+static uint32_t n_cb_fence(void *c, void *s, int f) {   // FenceSync/WaitSync：完成簿记取证
+    (void)c; (void)f;
+    {   // 前 6 次回报两张完成注册表状态（array/count）——定位 Unity 侧插入时机
+        static int nf;
+        if (nf++ < 6 && g_nmod) {
+            uint64_t gb = (uint64_t)(uintptr_t)g_mod[0].base;
+            uint64_t a = rd64_checked((void *)(uintptr_t)(gb + 0x2d201f0));
+            uint64_t b = rd64_checked((void *)(uintptr_t)(gb + 0x2d20200));
+            LOG("[fence#%d] 表1 arr=%#llx cnt=%llu 表2 arr=%#llx cnt=%llu sync=%p", nf,
+                (unsigned long long)a, a ? (unsigned long long)(rd64_checked((void *)(uintptr_t)(a + 8)) & 0xffffffff) : 0ull,
+                (unsigned long long)b, b ? (unsigned long long)(rd64_checked((void *)(uintptr_t)(b + 8)) & 0xffffffff) : 0ull, s);
+        }
+    }
+    return 0;
+}
 // —— 贴图/采样器/缓冲描述符池（对象：magic@0 pool@8 off@16 count@24）
 // 0x2c8f390 注册表污染探针：entry0(=0x2c8f420) 应为模块内静态对象指针；
 // 图形初始化期被 float2(1,1) 覆写 → 0x10506a0 崩。按里程碑采样夹出写者。
