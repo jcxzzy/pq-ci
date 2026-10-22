@@ -886,6 +886,12 @@ static char *g_guest_argv[2] = { g_arg0, NULL };
 static uint64_t h_gethostargc(void) { LOG("GetHostArgc → 1"); return 1; }
 static uint64_t h_gethostargv(void) { LOG("GetHostArgv → %p(\"%s\")", (void *)g_guest_argv, g_guest_argv[0]); return (uint64_t)(uintptr_t)g_guest_argv; }
 static uint64_t h_threadcoremask(void) { return 0x7; }   // Switch 真机 3 核（Unity 按编译期核数建每核数组，多给会溢写邻区）
+static uint64_t h_net_fail(void) { return (uint64_t)-1; }        // socket 族：-1 失败
+static uint64_t h_net_fail0(void) { return 0; }                   // Poll/Select：0 个就绪事件
+static uint64_t h_net_unavail(void) { return 0; }                 // IsNetworkAvailable/OnHold：否
+static uint64_t h_net_err(void) { return 0xD201; }                // nifm 结果：错误码
+static uint64_t h_net_errno(void) { return 51; }                  // BSD ENETUNREACH
+static uint64_t h_net_gaierr(void) { return (uint64_t)-2; }       // EAI_NONAME（域名不可解析）
 static uint32_t h_excstack(uint64_t *out) {
     mem_init();
     uint8_t *es = g_stack + STACK_CAP - 0x8000;   // 栈区顶段：线程栈自底向上分配，互不冲突
@@ -2263,6 +2269,29 @@ static hle_fn0 force_lookup(const char *name) {
         {"_ZN2nv18InitializeGraphicsEPvm", h_noop},
         {"_ZN2nn4nifm10InitializeEv", h_noop},   // 网络接口服务：Unity 启动必查；连接类接口后续按需接管
         {"_ZN2nn6socket10InitializeEPvmmi", h_noop},   // BSD 套接字层（在线功能；离线跑通为要）
+        {"_ZN2nn6socket10InitializeERKNS0_6ConfigE", h_noop},
+        // 网络快速失败（离线路径）：曾全部裸桩回 0——Connect「成功」却无网络，
+        // C# SocketAsyncCall 永等回应 = Load Manifest 后楔死的根因（SocketAsyncCall 线程实证）。
+        {"_ZN2nn4nifm18IsNetworkAvailableEv", (hle_fn0)h_net_unavail},   // 无网络 → Unity internetReachability=Not
+        {"_ZN2nn4nifm20SubmitNetworkRequestEv", h_noop},
+        {"_ZN2nn4nifm22IsNetworkRequestOnHoldEv", (hle_fn0)h_net_unavail},
+        {"_ZN2nn4nifm26HandleNetworkRequestResultEv", (hle_fn0)h_net_err},
+        {"_ZN2nn6socket6SocketEiii", (hle_fn0)h_net_fail},
+        {"_ZN2nn6socket7ConnectEiPK8sockaddrj", (hle_fn0)h_net_fail},
+        {"_ZN2nn6socket4BindEiPK8sockaddrj", (hle_fn0)h_net_fail},
+        {"_ZN2nn6socket6ListenEii", (hle_fn0)h_net_fail},
+        {"_ZN2nn6socket6AcceptEiP8sockaddrPj", (hle_fn0)h_net_fail},
+        {"_ZN2nn6socket4SendEiPKvmi", (hle_fn0)h_net_fail},
+        {"_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj", (hle_fn0)h_net_fail},
+        {"_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj", (hle_fn0)h_net_fail},
+        {"_ZN2nn6socket4PollEP6pollfdmi", (hle_fn0)h_net_fail0},
+        {"_ZN2nn6socket6SelectEiP6fd_setS2_S2_P7timeval", (hle_fn0)h_net_fail0},
+        {"_ZN2nn6socket11GetAddrInfoEPKcS2_PK8addrinfoPPS3_", (hle_fn0)h_net_gaierr},   // EAI_NONAME
+        {"_ZN2nn6socket12GetLastErrnoEv", (hle_fn0)h_net_errno},   // BSD ENETUNREACH=51
+        {"_ZN2nn6socket12SetLastErrnoEi", h_noop},
+        {"_ZN2nn6socket5CloseEi", h_noop},
+        {"_ZN2nn6socket8ShutdownEii", h_noop},
+        {"_ZN2nn6socket8FinalizeEv", h_noop},
         {"_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE", (hle_fn0)h_vi_opendefault},   // 假 Display；vi 其余接口走命名桩
         {"_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE", (hle_fn0)h_vi_createlayer},
         {"_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE", (hle_fn0)h_vi_getnativewindow},
