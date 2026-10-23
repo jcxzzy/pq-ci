@@ -1685,8 +1685,11 @@ static uint32_t n_queue_init(void *q, const void *b) {
 }
 static uint32_t n_queue_finalize(void *q) { LOG("nvn QueueFinalize %p", q); *(uint32_t *)q = 0; return 0; }
 static uint32_t n_queue_geterror(void *q, void *info) { (void)q; if (info) memset(info, 0, 0x18); return 0; }
+// —— Metal 回放层（nvn_mtl.m）：真提交 + 完成回流（第一阶段骨架） ——
+extern void mtl_submit_chains(void *const *handles, int n);
+extern void mtl_finish(void);
 static uint32_t n_queue_flush(void *q) { (void)q; return 0; }
-static uint32_t n_queue_finish(void *q) { (void)q; return 0; }
+static uint32_t n_queue_finish(void *q) { (void)q; mtl_finish(); return 0; }   // 真队列等待：等在途 Metal 提交完成
 static uint32_t n_queue_totalmem(void *q) { (void)q; return 0; }   // QueueGetTotal*MemoryUsed
 static uint32_t n_queue_resetcounts(void *q) { (void)q; return 0; }
 // —— 内存池（builder 布局自定：dev@0 flags@8 mem@16 size@24；对象：magic@0 flags@8 mem@16 size@24）
@@ -1909,12 +1912,14 @@ static void nop_walk_log(const uint8_t *h, int submit_no) {
         fputc('\n', stderr);
     }
 }
+// —— Metal 回放层接入：提交走真 MTLCommandBuffer（声明见 n_queue_finish 前） ——
 static uint32_t n_queue_submit(void *q, int n, void *const *cmds) {
     (void)q;
     static int submit_no;
     submit_no++;
     for (int i = 0; i < n; i++)
         if (cmds && cmds[i] && (uintptr_t)cmds[i] > 0x10000) nop_walk_log((const uint8_t *)cmds[i], submit_no);
+    mtl_submit_chains(cmds, n);
     return 0;
 }
 // —— 贴图/采样器/缓冲描述符池（对象：magic@0 pool@8 off@16 count@24）
