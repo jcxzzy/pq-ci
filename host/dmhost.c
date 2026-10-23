@@ -1811,7 +1811,7 @@ static uint8_t *nop_alloc(void *c, uint32_t size) {
             return cur;
         }
         void (*cb)(void *, int, uint64_t, void *) = (void (*)(void *, int, uint64_t, void *))NCB_P(c, 0x20);
-        if (cb) cb(c, 1, size + NOP_RESERVE, NCB_P(c, 0x28));   // NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_COMMAND_MEMORY
+        if (cb) cb(c, 0, size + NOP_RESERVE, NCB_P(c, 0x28));   // 事件 0 = OUT_OF_COMMAND_MEMORY（1 是控制内存——CI 实证传 1 游戏补 ctl、命令内存永不增长）
         else {   // 无回调（引导早期）：宿主补 64KB 段
             uint8_t *seg = malloc(0x10000);
             if (!seg) die("命令内存补段失败");
@@ -1837,8 +1837,14 @@ static uint64_t n_cb_memfree(void *c) {   // 当前段剩余（留 JUMP/END 余�
     return (cur && end > cur + NOP_RESERVE) ? (uint64_t)(end - cur - NOP_RESERVE) : 0;
 }
 static uint64_t n_cb_memused(void *c) { (void)c; return 0; }
-static uint32_t n_cb_addcmd(void *c, void *m, uint64_t n) {
-    if (m && n >= 16) nop_new_segment(c, m, n);   // 空池（m=0）是游戏「分不出」的信号，忽略等回调再补
+static uint32_t n_cb_addcmd(void *c, const void *pool, int64_t off, uint64_t n) {   // d2r 签名：(c, 池, 偏移, 字节数)
+    void *mem = pool ? *(void *const *)((const uint8_t *)pool + 16) : NULL;         // 池的 CPU 存储 @0x10
+    if (mem && n >= 64) nop_new_segment(c, (uint8_t *)mem + off, n);
+    else {   // 空池/过小（游戏「分不出」）：宿主 64KB 段兜底（d2r hostseg 同型）
+        uint8_t *seg = malloc(0x10000);
+        if (!seg) die("命令内存兜底段失败");
+        nop_new_segment(c, seg, 0x10000);
+    }
     return 0;
 }
 static uint32_t n_cb_addctl(void *c, void *m, uint64_t n) { (void)c; (void)m; (void)n; return 0; }
