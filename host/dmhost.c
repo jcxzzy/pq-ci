@@ -1762,35 +1762,120 @@ static uint32_t n_queue_present(void *q, void *w, void *tex, void *sema) {
     if (sema) { (void)sema; }   // 呈现完成 sync 的即时信号化同上回归，回退
     return 0;
 }
-static uint32_t n_queue_submit(void *q, int n, void *const *cmds) { (void)q; (void)n; (void)cmds; return 0; }
 static uint32_t n_win_label(void *w, const char *s) { (void)w; (void)s; return 0; }
 // —— 同步等待：立即可通过（引导期没有真 GPU 时序）
 static uint32_t n_sync_wait(void *s, int64_t timeout) { (void)s; (void)timeout; return 1; }
 static uint32_t n_sync_label(void *s, const char *n) { (void)s; (void)n; return 0; }
 static uint32_t n_sync_finalize(void *s) { *(uint32_t *)s = 0; return 0; }
-// —— 命令缓冲内存管理（对象：magic@0 dev@8 memcb@0x10 cbdata@0x18）
-static uint32_t n_cb_setcb(void *c, void *cb) { *(void **)((uint8_t *)c + 0x10) = cb; return 0; }
-static uint32_t n_cb_setcbdata(void *c, void *d) { *(void **)((uint8_t *)c + 0x18) = d; return 0; }
-static void *n_cb_getcb(void *c) { return *(void **)((uint8_t *)c + 0x10); }
-static void *n_cb_getcbdata(void *c) { return *(void **)((uint8_t *)c + 0x18); }
-static uint64_t n_cb_memfree(void *c) { (void)c; return 0x100000; }   // Command/Control Memory Free/Size：给足
-static uint64_t n_cb_memused(void *c) { (void)c; return 0; }
-static uint32_t n_cb_addcmd(void *c, void *m, uint64_t n) { (void)c; (void)m; (void)n; return 0; }
-static uint32_t n_cb_addctl(void *c, void *m, uint64_t n) { (void)c; (void)m; (void)n; return 0; }
-static uint32_t n_cb_setpool(void *c, void *pool, int64_t off) { (void)c; (void)pool; (void)off; return 0; }   // SetTexturePool/SetSamplerPool/SetShaderScratchMemory
-static uint32_t n_cb_fence(void *c, void *s, int f) {   // FenceSync/WaitSync：完成簿记取证
-    (void)c; (void)f;
-    {   // 前 6 次回报两张完成注册表状态（array/count）——定位 Unity 侧插入时机
-        static int nf;
-        if (nf++ < 6 && g_nmod) {
-            uint64_t gb = (uint64_t)(uintptr_t)g_mod[0].base;
-            uint64_t a = rd64_checked((void *)(uintptr_t)(gb + 0x2d201f0));
-            uint64_t b = rd64_checked((void *)(uintptr_t)(gb + 0x2d20200));
-            LOG("[fence#%d] 表1 arr=%#llx cnt=%llu 表2 arr=%#llx cnt=%llu sync=%p", nf,
-                (unsigned long long)a, a ? (unsigned long long)(rd64_checked((void *)(uintptr_t)(a + 8)) & 0xffffffff) : 0ull,
-                (unsigned long long)b, b ? (unsigned long long)(rd64_checked((void *)(uintptr_t)(b + 8)) & 0xffffffff) : 0ull, s);
+// ---------- 命令录制层（d2r hle_nvn.c / nvn_obj.h 移植） ----------
+// 记录 = {op u32, size u32（含头，8 对齐）} + 载荷；句柄 = BEGIN 记录地址；
+// 段链 = JUMP 记录；游戏经 AddCommandMemory 供内存、耗尽按 NVN 约定回调补段。
+// Metal 回放层（后续）从 QueueSubmitCommands 的句柄走这条链回放。
+enum {
+    NOP_END, NOP_JUMP, NOP_BEGIN, NOP_CALL, NOP_SIGNAL_EVENT, NOP_REPORT_COUNTER,
+    NOP_COPY_B2B, NOP_UPDATE_UB, NOP_SET_RT, NOP_CLEAR_COLOR, NOP_CLEAR_DS,
+    NOP_VIEWPORTS, NOP_SCISSOR, NOP_DEPTH_RANGE, NOP_BIND_PROGRAM, NOP_BIND_STATE,
+    NOP_BIND_VATTR, NOP_BIND_VSTREAM, NOP_BIND_VBUF, NOP_BIND_UBO, NOP_BIND_SSBO,
+    NOP_BIND_TEX, NOP_BIND_SAMP, NOP_STENCIL, NOP_POLY_OFFSET, NOP_DRAW, NOP_DRAW_IDX,
+    NOP_DISPATCH, NOP_BARRIER, NOP_SET_TEX_POOL, NOP_SET_SAMP_POOL, NOP_COPY_B2T,
+    NOP_COPY_STRIDE, NOP_BLEND_COLOR, NOP_COPY_T2B, NOP_BIND_IMG, NOP_COPY_T2T,
+    NOP_RESET_COUNTER, NOP_CLEAR_TEX, NOP_COUNT_
+};
+// cmd_t（d2r 布局，就地用游戏对象）：magic@0 recording@4 cur@8 end@0x10 begin@0x18 cb@0x20 data@0x28 dev@0x30
+#define NCB_U32(c, o) (*(uint32_t *)((uint8_t *)(c) + (o)))
+#define NCB_P(c, o) (*(void **)((uint8_t *)(c) + (o)))
+#define NOP_RESERVE 24
+static void nop_put_hdr(uint8_t *p, uint32_t op, uint32_t size) {
+    p[0] = (uint8_t)(op & 0xff); p[1] = (uint8_t)((op >> 8) & 0xff); p[2] = (uint8_t)((op >> 16) & 0xff); p[3] = (uint8_t)(op >> 24);
+    p[4] = (uint8_t)(size & 0xff); p[5] = (uint8_t)((size >> 8) & 0xff); p[6] = (uint8_t)((size >> 16) & 0xff); p[7] = (uint8_t)(size >> 24);
+}
+static uint32_t nop_op_of(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+static uint32_t nop_size_of(const uint8_t *p) { return (uint32_t)p[4] | (uint32_t)p[5] << 8 | (uint32_t)p[6] << 16 | (uint32_t)p[7] << 24; }
+static void nop_new_segment(void *c, void *mem, uint64_t n) {
+    uint8_t *start = (uint8_t *)(((uintptr_t)mem + 7) & ~(uintptr_t)7);
+    if (NCB_U32(c, 4) && NCB_P(c, 8)) {   // 录制中：旧段尾写 JUMP 接链
+        uint8_t *cur = (uint8_t *)NCB_P(c, 8);
+        nop_put_hdr(cur, NOP_JUMP, 16);
+        memcpy(cur + 8, &start, 8);
+    }
+    NCB_P(c, 8) = start;
+    NCB_P(c, 0x10) = (uint8_t *)mem + n;
+}
+static uint8_t *nop_alloc(void *c, uint32_t size) {
+    size = (size + 7) & ~7u;
+    for (int tries = 0; tries < 3; tries++) {
+        uint8_t *cur = (uint8_t *)NCB_P(c, 8), *end = (uint8_t *)NCB_P(c, 0x10);
+        if (cur && (uint64_t)(end - cur) >= (uint64_t)size + NOP_RESERVE) {
+            NCB_P(c, 8) = cur + size;
+            nop_put_hdr(cur, 0, size);
+            return cur;
+        }
+        void (*cb)(void *, int, uint64_t, void *) = (void (*)(void *, int, uint64_t, void *))NCB_P(c, 0x20);
+        if (cb) cb(c, 1, size + NOP_RESERVE, NCB_P(c, 0x28));   // NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_COMMAND_MEMORY
+        else {   // 无回调（引导早期）：宿主补 64KB 段
+            uint8_t *seg = malloc(0x10000);
+            if (!seg) die("命令内存补段失败");
+            nop_new_segment(c, seg, 0x10000);
         }
     }
+    die("NVN 命令内存耗尽（cb 回调未能补充）");
+    return NULL;
+}
+static void *nop_rec(void *c, uint32_t op, uint32_t payload) {
+    uint32_t sz = (8 + payload + 7) & ~7u;
+    uint8_t *p = nop_alloc(c, sz);
+    nop_put_hdr(p, op, sz);
+    memset(p + 8, 0, sz - 8);
+    return p + 8;
+}
+static uint32_t n_cb_setcb(void *c, void *cb) { NCB_P(c, 0x20) = cb; return 0; }
+static uint32_t n_cb_setcbdata(void *c, void *d) { NCB_P(c, 0x28) = d; return 0; }
+static void *n_cb_getcb(void *c) { return NCB_P(c, 0x20); }
+static void *n_cb_getcbdata(void *c) { return NCB_P(c, 0x28); }
+static uint64_t n_cb_memfree(void *c) {   // 当前段剩余（留 JUMP/END 余量）
+    uint8_t *cur = (uint8_t *)NCB_P(c, 8), *end = (uint8_t *)NCB_P(c, 0x10);
+    return (cur && end > cur + NOP_RESERVE) ? (uint64_t)(end - cur - NOP_RESERVE) : 0;
+}
+static uint64_t n_cb_memused(void *c) { (void)c; return 0; }
+static uint32_t n_cb_addcmd(void *c, void *m, uint64_t n) {
+    if (m && n >= 16) nop_new_segment(c, m, n);   // 空池（m=0）是游戏「分不出」的信号，忽略等回调再补
+    return 0;
+}
+static uint32_t n_cb_addctl(void *c, void *m, uint64_t n) { (void)c; (void)m; (void)n; return 0; }
+static uint32_t n_cb_setpool(void *c, void *pool, int64_t off) { (void)c; (void)pool; (void)off; return 0; }
+static uint32_t n_cb_fence(void *c, void *s, int f) { (void)c; (void)f; (void)s; return 0; }   // FenceSync/WaitSync：簿记随回放层回流
+// —— 提交回放验证：走句柄链统计（Metal 层入口替换此处）——
+static void nop_walk_log(const uint8_t *h, int submit_no) {
+    static uint64_t total_recs;
+    uint32_t hist[NOP_COUNT_];
+    memset(hist, 0, sizeof hist);
+    uint64_t recs = 0, bytes = 0;
+    const uint8_t *p = h;
+    for (int guard = 0; guard < 200000; guard++) {
+        if (!ptr_readable(p)) break;
+        uint32_t op = nop_op_of(p), sz = nop_size_of(p);
+        if (sz < 8 || sz > 0x100000) break;
+        if (op < NOP_COUNT_) hist[op]++;
+        recs++; bytes += sz;
+        if (op == NOP_END) break;
+        if (op == NOP_JUMP) { memcpy(&p, p + 8, 8); continue; }
+        p += sz;
+    }
+    total_recs += recs;
+    if (submit_no <= 5 || submit_no % 300 == 0) {
+        fprintf(stderr, "[dm] 提交#%d %llu 条 / %llu 字节（累计 %llu）：", submit_no,
+                (unsigned long long)recs, (unsigned long long)bytes, (unsigned long long)total_recs);
+        for (uint32_t op = 0; op < NOP_COUNT_; op++)
+            if (hist[op]) fprintf(stderr, " op%u×%u", op, hist[op]);
+        fputc('\n', stderr);
+    }
+}
+static uint32_t n_queue_submit(void *q, int n, void *const *cmds) {
+    (void)q;
+    static int submit_no;
+    submit_no++;
+    for (int i = 0; i < n; i++)
+        if (cmds && cmds[i] && (uintptr_t)cmds[i] > 0x10000) nop_walk_log((const uint8_t *)cmds[i], submit_no);
     return 0;
 }
 // —— 贴图/采样器/缓冲描述符池（对象：magic@0 pool@8 off@16 count@24）
@@ -1871,8 +1956,6 @@ static uint32_t n_sync_init(void *s, void *dev, uint32_t flags) {
     if (n_logged++ < 3) LOG("nvn SyncInitialize %p flags=%#x ← %p（前 3 个）", s, flags, NVN_CALLER);
     return 1;
 }
-// 注意：不 memset 整对象——Unity 的命令缓冲对象（实证 0xe0 字节）同时携带其他字段
-// （+0xb0=同步池包装、+0xc0=内存池），清 0x100 会抹掉它们并溢出堆 32 字节
 // —— 程序（着色器组）：Initialize 返回 NVNboolean——返回 0 曾被 Unity 判定
 // 「着色器初始化失败」，material.SetPass 报错、渲染子系统不完成（CI 实证 UNIMPL 面）
 typedef struct { uint32_t magic; void *dev; uint64_t shaders[8]; int nshaders; } prog_t;
@@ -1894,10 +1977,20 @@ static uint64_t n_prog_getshader(const void *pr, int st) {
 }
 static int n_prog_getcount(const void *pr) { return ((const prog_t *)pr)->nshaders; }
 static void n_prog_label(void *pr, const char *l) { (void)pr; (void)l; }
-// —— 命令录制族：句柄记账（真 Metal 回放在此层生长，先保语义放行）
-static uint64_t g_cmdh_seq;
-static void *n_cb_beginrec(void *c) { (void)c; return (void *)(uintptr_t)(0x90000000ull | ++g_cmdh_seq); }
-static void *n_cb_endrec(void *c) { (void)c; return (void *)(uintptr_t)(0x90000000ull | g_cmdh_seq); }
+// —— 命令录制族：真记录（d2r 语义）——句柄 = BEGIN 记录地址；段尾 JUMP 接链；Metal 回放走链
+static void *n_cb_beginrec(void *c) {
+    uint8_t *p = nop_alloc(c, 8);
+    nop_put_hdr(p, NOP_BEGIN, 8);
+    NCB_U32(c, 4) = 1;                 // recording = true
+    NCB_P(c, 0x18) = p;                // begin = 句柄（BEGIN 记录地址）
+    return p;
+}
+static void *n_cb_endrec(void *c) {
+    uint8_t *p = nop_alloc(c, 8);
+    nop_put_hdr(p, NOP_END, 8);
+    NCB_U32(c, 4) = 0;                 // recording = false
+    return NCB_P(c, 0x18);             // 句柄 = BEGIN 地址
+}
 static uint32_t n_cb_setrt(void *c, int n, void *const *cts, void *const *cvs, void *dt, void *dv) { (void)c; (void)n; (void)cts; (void)cvs; (void)dt; (void)dv; return 0; }
 static uint32_t n_cb_setviewport(void *c, int first, int n, const float *v) { (void)c; (void)first; (void)n; (void)v; return 0; }
 static uint32_t n_cb_setscissor(void *c, int x, int y, int w, int h) { (void)c; (void)x; (void)y; (void)w; (void)h; return 0; }
@@ -1931,7 +2024,16 @@ static uint32_t n_cb_b2b(void *c, uint64_t dst, uint64_t src, uint64_t n, int fl
 static uint32_t n_cb_updubo(void *c, int st, int i, const void *data, uint64_t n, uint64_t off) { (void)c;(void)st;(void)i;(void)data;(void)n;(void)off; return 0; }
 static uint32_t n_queue_label(void *q, const char *l) { (void)q; (void)l; return 0; }
 static void n_buf_label(void *b, const char *l) { (void)b; (void)l; }
-static uint32_t n_cb_init(void *c, void *dev) { *(uint32_t *)c = NVN_MAGIC('C', 'M', 'D', 'B'); *(void **)((uint8_t *)c + 8) = dev; LOG("nvn CommandBufferInitialize %p dev=%p ← %p", c, dev, NVN_CALLER); return 1; }
+// 注意：不 memset 整对象——Unity 的命令缓冲对象（实证 0xe0 字节）同时携带其他字段
+// （+0xb0=同步池包装、+0xc0=内存池），清 0x100 会抹掉它们并溢出堆 32 字节。
+// cmd_t 布局（d2r）：magic@0 recording@4 cur@8 end@0x10 begin@0x18 cb@0x20 data@0x28 dev@0x30
+static uint32_t n_cb_init(void *c, void *dev) {
+    memset(c, 0, 0x38);
+    *(uint32_t *)c = NVN_MAGIC('C', 'M', 'D', 'B');
+    NCB_P(c, 0x30) = dev;
+    LOG("nvn CommandBufferInitialize %p dev=%p ← %p（cmd_t 布局）", c, dev, NVN_CALLER);
+    return 1;
+}
 static void *h_nvn_bootstrap(const char *name) {
     if (!name || !*name) return NULL;
     static const struct { const char *nm; void *fn; } known[] = {
