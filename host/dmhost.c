@@ -1686,8 +1686,14 @@ static uint32_t n_queue_init(void *q, const void *b) {
 static uint32_t n_queue_finalize(void *q) { LOG("nvn QueueFinalize %p", q); *(uint32_t *)q = 0; return 0; }
 static uint32_t n_queue_geterror(void *q, void *info) { (void)q; if (info) memset(info, 0, 0x18); return 0; }
 // —— Metal 回放层（nvn_mtl.m）：真提交 + 完成回流（第一阶段骨架） ——
-extern void mtl_submit_chains(void *const *handles, int n);
+extern void mtl_submit_chains(void *const *handles, int n, void **syncs, int nsync);
 extern void mtl_finish(void);
+extern void mtl_defer_signal(void *sync, uint64_t delay_ms);
+// —— sync 对象状态（对象 0x20 我们 memset 过，可用字段）：magic@0 state@4（0 idle 1 pending 2 signaled） ——
+static void sync_set_pending(void *s) { if (s) *(volatile uint32_t *)((uint8_t *)s + 4) = 1; }
+void nvn_sync_mark_signaled(void *s) {   // mtl 完成回调线程调用（nvn_mtl.m extern）
+    if (s) *(volatile uint32_t *)((uint8_t *)s + 4) = 2;
+}
 static uint32_t n_queue_flush(void *q) { (void)q; return 0; }
 static uint32_t n_queue_finish(void *q) { (void)q; mtl_finish(); return 0; }   // 真队列等待：等在途 Metal 提交完成
 static uint32_t n_queue_totalmem(void *q) { (void)q; return 0; }   // QueueGetTotal*MemoryUsed
@@ -1762,12 +1768,25 @@ static uint32_t n_win_acquire(void *w, void **tex, void **sema) {
 static uint32_t n_queue_present(void *q, void *w, void *tex, void *sema) {
     (void)q; (void)tex;
     if (w) (*(uint32_t *)((uint8_t *)w + 44))++;
-    if (sema) { (void)sema; }   // 呈现完成 sync 的即时信号化同上回归，回退
+    if (sema) { sync_set_pending(sema); mtl_defer_signal(sema, 16); }   // 呈现退役：约一帧后信号（即时信号化已实证回归）
     return 0;
 }
 static uint32_t n_win_label(void *w, const char *s) { (void)w; (void)s; return 0; }
-// —— 同步等待：立即可通过（引导期没有真 GPU 时序）
-static uint32_t n_sync_wait(void *s, int64_t timeout) { (void)s; (void)timeout; return 1; }
+// —— 同步等待：idle/signaled 直过；pending（本批 FenceSync 挂起）等真信号——
+// 完成走异步节拍（真 Metal 回调 / 软件模拟延迟），不是即时信号化（已实证回归）。
+// 无限等待也封顶 1s 按已信号放行，防个别漏信号的 sync 把线程永锁。
+static uint32_t n_sync_wait(void *s, int64_t timeout) {
+    if (!s) return 1;
+    if (*(volatile uint32_t *)((uint8_t *)s + 4) != 1) return 1;
+    int64_t waited = 0, cap = timeout < 0 ? 1000000000ll : timeout;
+    while (*(volatile uint32_t *)((uint8_t *)s + 4) == 1) {
+        if (waited >= cap) { LOG("nvn SyncWait %p 超时（%lldns）——按已信号放行", s, (long long)cap); return 1; }
+        struct timespec ts = {0, 1000000};
+        nanosleep(&ts, NULL);
+        waited += 1000000;
+    }
+    return 1;
+}
 static uint32_t n_sync_label(void *s, const char *n) { (void)s; (void)n; return 0; }
 static uint32_t n_sync_finalize(void *s) { *(uint32_t *)s = 0; return 0; }
 // ---------- 命令录制层（d2r hle_nvn.c / nvn_obj.h 移植） ----------
@@ -1887,7 +1906,7 @@ static uint32_t n_cb_fence(void *c, void *s, int cond, int flags) {   // FenceSy
 }
 static uint32_t n_cb_waitsync(void *c, void *s) { (void)c; (void)s; return 0; }   // WaitSync：回放串行化天然满足
 // —— 提交回放验证：走句柄链统计（Metal 层入口替换此处）——
-static void nop_walk_log(const uint8_t *h, int submit_no) {
+static void nop_walk_log(const uint8_t *h, int submit_no, void **syncs, int max_syncs, int *nsyncs) {
     static uint64_t total_recs;
     uint32_t hist[NOP_COUNT_];
     memset(hist, 0, sizeof hist);
@@ -1898,6 +1917,10 @@ static void nop_walk_log(const uint8_t *h, int submit_no) {
         uint32_t op = nop_op_of(p), sz = nop_size_of(p);
         if (sz < 8 || sz > 0x100000) break;
         if (op < NOP_COUNT_) hist[op]++;
+        if (op == NOP_FENCE_SYNC && syncs && nsyncs && *nsyncs < max_syncs) {   // p_fence_t.sync @ 载荷 0
+            void *s; memcpy(&s, p + 8, 8);
+            syncs[(*nsyncs)++] = s;
+        }
         recs++; bytes += sz;
         if (op == NOP_END) break;
         if (op == NOP_JUMP) { memcpy(&p, p + 8, 8); continue; }
@@ -1912,14 +1935,24 @@ static void nop_walk_log(const uint8_t *h, int submit_no) {
         fputc('\n', stderr);
     }
 }
-// —— Metal 回放层接入：提交走真 MTLCommandBuffer（声明见 n_queue_finish 前） ——
+// —— Metal 回放层接入：提交走真 MTLCommandBuffer（声明见 n_queue_finish 前）——
 static uint32_t n_queue_submit(void *q, int n, void *const *cmds) {
     (void)q;
     static int submit_no;
     submit_no++;
+    void *syncs[64];
+    int nsyncs = 0;
     for (int i = 0; i < n; i++)
-        if (cmds && cmds[i] && (uintptr_t)cmds[i] > 0x10000) nop_walk_log((const uint8_t *)cmds[i], submit_no);
-    mtl_submit_chains(cmds, n);
+        if (cmds && cmds[i] && (uintptr_t)cmds[i] > 0x10000) nop_walk_log((const uint8_t *)cmds[i], submit_no, syncs, 64, &nsyncs);
+    void **dup = NULL;
+    if (nsyncs) {
+        dup = malloc(sizeof(void *) * (size_t)nsyncs);
+        if (dup) {
+            memcpy(dup, syncs, sizeof(void *) * (size_t)nsyncs);
+            for (int i = 0; i < nsyncs; i++) sync_set_pending(dup[i]);
+        }
+    }
+    mtl_submit_chains(cmds, n, dup, dup ? nsyncs : 0);   // dup 由 mtl 层完成后释放
     return 0;
 }
 // —— 贴图/采样器/缓冲描述符池（对象：magic@0 pool@8 off@16 count@24）
