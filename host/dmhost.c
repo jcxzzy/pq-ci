@@ -1765,10 +1765,10 @@ static uint32_t n_win_acquire(void *w, void **tex, void **sema) {
     if (tex) *tex = (texs && n >= 1 && n <= 8 && ptr_readable(texs)) ? texs[*(uint32_t *)((uint8_t *)w + 44) % n] : NULL;
     return 1;
 }
-static uint32_t n_queue_present(void *q, void *w, void *tex, void *sema) {
-    (void)q; (void)tex;
+static uint32_t n_queue_present(void *q, void *w, int tex_idx) {   // 真 ABI 3 参（无 sync——x3 是残留值，读它即崩）
+    (void)q;
     if (w) (*(uint32_t *)((uint8_t *)w + 44))++;
-    if (sema) { sync_set_pending(sema); mtl_defer_signal(sema, 16); }   // 呈现退役：约一帧后信号（即时信号化已实证回归）
+    (void)tex_idx;
     return 0;
 }
 static uint32_t n_win_label(void *w, const char *s) { (void)w; (void)s; return 0; }
@@ -1822,6 +1822,7 @@ typedef struct { int32_t first, n; uint32_t st[16]; } p_bind_vattr_t;
 typedef struct { int32_t first, n; uint64_t st[16]; } p_bind_vstream_t;
 typedef struct { int32_t first, n; uint64_t addr[16], size[16]; } p_bind_vbuf_t;
 typedef struct { int32_t stage, index; uint64_t addr, size; } p_bind_buf_t;   // UBO / SSBO
+typedef struct { int32_t stage, first, n; uint64_t h[32]; } p_bind_handles_t;   // 组合/分离 贴图与采样器句柄
 typedef struct { int32_t face, value_mask, mask, ref, which; } p_stencil_t;   // which：0 值掩码 1 写掩码 2 参考值
 typedef struct { float factor, units, clamp; } p_poly_offset_t;
 typedef struct { int32_t prim, first, count; } p_draw_t;
@@ -2156,6 +2157,17 @@ static uint32_t n_bind_bufs(void *c, int st, int first, int n, const void *rg) {
     return 0;
 }
 static uint64_t n_buf_getsize(const void *b) { return *(const uint64_t *)((const uint8_t *)b + 0x18); }
+// —— 贴图 / 采样器句柄绑定（BindTexture(s)/BindSeparate*：组合句柄与分离句柄同载荷）
+static void bind_handles_rec(void *c, int op, int st, int first, int n, const uint64_t *h) {
+    if (n < 0 || n > 32) return;
+    p_bind_handles_t *r = nop_rec(c, op, sizeof *r);
+    r->stage = st; r->first = first; r->n = n;
+    if (h && n > 0) memcpy(r->h, h, 8 * (size_t)n);
+}
+static uint32_t n_bind_tex1(void *c, int st, int first, uint64_t h) { bind_handles_rec(c, NOP_BIND_TEX, st, first, 1, &h); return 0; }
+static uint32_t n_bind_texn(void *c, int st, int first, int n, const uint64_t *h) { bind_handles_rec(c, NOP_BIND_TEX, st, first, n, h); return 0; }
+static uint32_t n_bind_samp1(void *c, int st, int first, uint64_t h) { bind_handles_rec(c, NOP_BIND_SAMP, st, first, 1, &h); return 0; }
+static uint32_t n_bind_sampn(void *c, int st, int first, int n, const uint64_t *h) { bind_handles_rec(c, NOP_BIND_SAMP, st, first, n, h); return 0; }
 // —— 绘制提交族（真记录：参数按真实 NVN ABI 逐名取位——旧桩曾把 DrawElements 错配 3 参版、
 // UpdateUniformBuffer 错位、CopyB2B 反序，此处一并修正）
 static uint64_t g_texpool_seq;
@@ -2469,6 +2481,12 @@ static void *h_nvn_bootstrap(const char *name) {
         {"nvnCommandBufferBindUniformBuffers", (void *)n_bind_bufs},
         {"nvnCommandBufferBindStorageBuffer", (void *)n_bind_ssbo1},
         {"nvnCommandBufferBindStorageBuffers", (void *)n_bind_bufs},
+        {"nvnCommandBufferBindTexture", (void *)n_bind_tex1},
+        {"nvnCommandBufferBindTextures", (void *)n_bind_texn},
+        {"nvnCommandBufferBindSeparateTexture", (void *)n_bind_tex1},
+        {"nvnCommandBufferBindSeparateTextures", (void *)n_bind_texn},
+        {"nvnCommandBufferBindSeparateSampler", (void *)n_bind_samp1},
+        {"nvnCommandBufferBindSeparateSamplers", (void *)n_bind_sampn},
         {"nvnCommandBufferBindVertexBuffers", (void *)n_bind_vbuf},
         {"nvnCommandBufferClearColor", (void *)n_cb_clearcolor},
         {"nvnCommandBufferClearDepthStencil", (void *)n_cb_cleards},
