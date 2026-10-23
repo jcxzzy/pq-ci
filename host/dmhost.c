@@ -1779,12 +1779,36 @@ enum {
     NOP_BIND_TEX, NOP_BIND_SAMP, NOP_STENCIL, NOP_POLY_OFFSET, NOP_DRAW, NOP_DRAW_IDX,
     NOP_DISPATCH, NOP_BARRIER, NOP_SET_TEX_POOL, NOP_SET_SAMP_POOL, NOP_COPY_B2T,
     NOP_COPY_STRIDE, NOP_BLEND_COLOR, NOP_COPY_T2B, NOP_BIND_IMG, NOP_COPY_T2T,
-    NOP_RESET_COUNTER, NOP_CLEAR_TEX, NOP_COUNT_
+    NOP_RESET_COUNTER, NOP_CLEAR_TEX, NOP_FENCE_SYNC, NOP_COUNT_
 };
 // cmd_t（d2r 布局，就地用游戏对象）：magic@0 recording@4 cur@8 end@0x10 begin@0x18 cb@0x20 data@0x28 dev@0x30
 #define NCB_U32(c, o) (*(uint32_t *)((uint8_t *)(c) + (o)))
 #define NCB_P(c, o) (*(void **)((uint8_t *)(c) + (o)))
 #define NOP_RESERVE 24
+// —— 记录载荷（d2r nvn_obj.h 布局；Metal 回放层在本宿主内消费） ——
+typedef struct { uint8_t set_levels, set_layers, set_format, set_target; int32_t base_level, nlevels, min_layer, nlayers, format, target; } nview_t;   // NVNtextureView 24B 快照
+static void vsnap(nview_t *dst, uint8_t *has, const void *v) { *has = v != NULL; if (v) memcpy(dst, v, sizeof(nview_t)); }
+typedef struct { int32_t x, y, z, w, h, d; } nregion_t;   // NVNcopyRegion
+typedef struct { int32_t n; const void *color[8]; nview_t cview[8]; uint8_t has_cview[8]; const void *depth; nview_t dview; uint8_t has_dview; } p_set_rt_t;
+typedef struct { int32_t index, mask; float rgba[4]; } p_clear_color_t;
+typedef struct { float depth; int32_t depth_mask, stencil, stencil_mask; } p_clear_ds_t;
+typedef struct { int32_t first, n; float v[16][6]; } p_viewports_t;   // 每视口前 4 float = x,y,w,h（近远由 DEPTH_RANGE 覆盖）
+typedef struct { int32_t x, y, w, h; } p_scissor_t;
+typedef struct { const void *prog; int32_t stages; } p_bind_program_t;
+typedef struct { int32_t kind; uint8_t bytes[0x18]; } p_bind_state_t;   // kind：0 blend 1 color 2 chmask 3 ms 4 poly 5 ds
+typedef struct { int32_t first, n; uint32_t st[16]; } p_bind_vattr_t;
+typedef struct { int32_t first, n; uint64_t st[16]; } p_bind_vstream_t;
+typedef struct { int32_t first, n; uint64_t addr[16], size[16]; } p_bind_vbuf_t;
+typedef struct { int32_t stage, index; uint64_t addr, size; } p_bind_buf_t;   // UBO / SSBO
+typedef struct { int32_t face, value_mask, mask, ref, which; } p_stencil_t;   // which：0 值掩码 1 写掩码 2 参考值
+typedef struct { float factor, units, clamp; } p_poly_offset_t;
+typedef struct { int32_t prim, first, count; } p_draw_t;
+typedef struct { int32_t prim, itype, count, base_vertex, base_instance, instances; uint64_t ibuf; } p_draw_idx_t;
+typedef struct { const void *pool; } p_set_pool_t;
+typedef struct { uint64_t src; const void *tex; nview_t view; uint8_t has_view; uint8_t pad[3]; int32_t flags; nregion_t r; } p_copy_b2t_t;
+typedef struct { const void *src, *dst; nview_t sv, dv; uint8_t has_sv, has_dv; uint8_t pad[2]; int32_t flags; nregion_t sr, dr; } p_copy_t2t_t;
+typedef struct { float rgba[4]; } p_blend_color_t;
+typedef struct { void *sync; int32_t cond, flags; } p_fence_t;
 static void nop_put_hdr(uint8_t *p, uint32_t op, uint32_t size) {
     p[0] = (uint8_t)(op & 0xff); p[1] = (uint8_t)((op >> 8) & 0xff); p[2] = (uint8_t)((op >> 16) & 0xff); p[3] = (uint8_t)(op >> 24);
     p[4] = (uint8_t)(size & 0xff); p[5] = (uint8_t)((size >> 8) & 0xff); p[6] = (uint8_t)((size >> 16) & 0xff); p[7] = (uint8_t)(size >> 24);
@@ -1848,8 +1872,17 @@ static uint32_t n_cb_addcmd(void *c, const void *pool, int64_t off, uint64_t n) 
     return 0;
 }
 static uint32_t n_cb_addctl(void *c, void *m, uint64_t n) { (void)c; (void)m; (void)n; return 0; }
-static uint32_t n_cb_setpool(void *c, void *pool, int64_t off) { (void)c; (void)pool; (void)off; return 0; }
-static uint32_t n_cb_fence(void *c, void *s, int f) { (void)c; (void)f; (void)s; return 0; }   // FenceSync/WaitSync：簿记随回放层回流
+static uint32_t n_scratch(void *c, void *pool, int64_t off, uint64_t sz) { (void)c; (void)pool; (void)off; (void)sz; return 0; }   // SetShaderScratchMemory(c, pool, off, size)
+static uint32_t n_cb_setpool(void *c, const void *pool) {   // SetTexturePool(c, pool)
+    p_set_pool_t *r = nop_rec(c, NOP_SET_TEX_POOL, sizeof *r); r->pool = pool; return 0;
+}
+static uint32_t n_cb_setsamppool(void *c, const void *pool) {   // SetSamplerPool(c, pool)
+    p_set_pool_t *r = nop_rec(c, NOP_SET_SAMP_POOL, sizeof *r); r->pool = pool; return 0;
+}
+static uint32_t n_cb_fence(void *c, void *s, int cond, int flags) {   // FenceSync(c, sync, condition, flags)——回放完成时信号化
+    p_fence_t *r = nop_rec(c, NOP_FENCE_SYNC, sizeof *r); r->sync = s; r->cond = cond; r->flags = flags; return 0;
+}
+static uint32_t n_cb_waitsync(void *c, void *s) { (void)c; (void)s; return 0; }   // WaitSync：回放串行化天然满足
 // —— 提交回放验证：走句柄链统计（Metal 层入口替换此处）——
 static void nop_walk_log(const uint8_t *h, int submit_no) {
     static uint64_t total_recs;
@@ -1997,37 +2030,158 @@ static void *n_cb_endrec(void *c) {
     NCB_U32(c, 4) = 0;                 // recording = false
     return NCB_P(c, 0x18);             // 句柄 = BEGIN 地址
 }
-static uint32_t n_cb_setrt(void *c, int n, void *const *cts, void *const *cvs, void *dt, void *dv) { (void)c; (void)n; (void)cts; (void)cvs; (void)dt; (void)dv; return 0; }
-static uint32_t n_cb_setviewport(void *c, int first, int n, const float *v) { (void)c; (void)first; (void)n; (void)v; return 0; }
-static uint32_t n_cb_setscissor(void *c, int x, int y, int w, int h) { (void)c; (void)x; (void)y; (void)w; (void)h; return 0; }
+static uint32_t n_cb_setrt(void *c, int n, void *const *cts, void *const *cvs, void *dt, void *dv) {
+    if (n < 0 || n > 8) n = n < 0 ? 0 : 8;
+    p_set_rt_t *r = nop_rec(c, NOP_SET_RT, sizeof *r);
+    r->n = n;
+    for (int i = 0; i < n; i++) { r->color[i] = cts ? cts[i] : NULL; vsnap(&r->cview[i], &r->has_cview[i], cvs ? cvs[i] : NULL); }
+    r->depth = dt; vsnap(&r->dview, &r->has_dview, dv);
+    return 0;
+}
+static uint32_t n_cb_setviewport(void *c, int first, int n, const float *v) {   // SetViewport(s)：每视口 4 float
+    if (n < 0 || first < 0 || first + n > 16 || !v) return 0;
+    p_viewports_t *r = nop_rec(c, NOP_VIEWPORTS, sizeof *r);
+    r->first = first; r->n = n;
+    for (int i = 0; i < n; i++) memcpy(r->v[i], v + 4 * i, 16);
+    return 0;
+}
+static uint32_t n_cb_setscissor(void *c, int x, int y, int w, int h) {
+    p_scissor_t *r = nop_rec(c, NOP_SCISSOR, sizeof *r); r->x = x; r->y = y; r->w = w; r->h = h; return 0;
+}
 static uint32_t n_cb_setpointsize(void *c, float v) { (void)c; (void)v; return 0; }
 static uint64_t n_cb_zculldata(void *c, void *b, uint64_t n) { (void)c; (void)b; return n; }   // Save/RestoreZCullData：回写字节数
 static uint32_t n_cb_downsample(void *c, void *dst, void *src) { (void)c; (void)dst; (void)src; return 0; }
-static uint32_t n_cb_copyt2t(void *c, void *s, void *sv, void *sr, void *d, void *dv, void *dr, int fl) { (void)c;(void)s;(void)sv;(void)sr;(void)d;(void)dv;(void)dr;(void)fl; return 0; }
+static uint32_t n_cb_copyt2t(void *c, void *s, void *sv, void *sr, void *d, void *dv, void *dr, int fl) {
+    p_copy_t2t_t *r = nop_rec(c, NOP_COPY_T2T, sizeof *r);
+    r->src = s; r->dst = d; vsnap(&r->sv, &r->has_sv, sv); vsnap(&r->dv, &r->has_dv, dv);
+    if (sr) memcpy(&r->sr, sr, sizeof(nregion_t));
+    if (dr) memcpy(&r->dr, dr, sizeof(nregion_t));
+    r->flags = fl;
+    return 0;
+}
 static uint32_t n_cb_label(void *c, const char *l) { (void)c; (void)l; return 0; }
 // —— 采样数读回（Unity 读自己的状态；回 0 曾是「多采样关」错读）
 static uint32_t n_tex_getsamples(const void *t) { return ((const tex_t *)t)->d.samples; }
 static uint32_t n_ms_getsamples(const void *st) { return ((const nms_t *)st)->samples; }
 static uint32_t n_ms_getenable(const void *st) { return ((const nms_t *)st)->enable; }
 static uint32_t n_co_setlogicop(void *st, int op) { ((ncolor_t *)st)->logic_op = (uint32_t)op & 0xF; return 0; }
-// —— 状态绑定族（CommandBufferBindXxxState：记录语义，绑定即生效——回放层在此生长）
-static uint32_t n_cb_bindstate(void *c, const void *st) { (void)c; (void)st; return 0; }
+// —— 状态绑定族（CommandBufferBindXxxState：快照进记录，回放端按 kind 还原）
+static uint32_t n_bind_st(void *c, int kind, const void *st) {
+    p_bind_state_t *r = nop_rec(c, NOP_BIND_STATE, sizeof *r);
+    r->kind = kind;
+    if (st) memcpy(r->bytes, st, sizeof r->bytes);   // 六种状态对象均 ≤0x18（d2r FITS 实测）
+    return 0;
+}
+static uint32_t n_bindst0(void *c, const void *s) { return n_bind_st(c, 0, s); }   // blend
+static uint32_t n_bindst1(void *c, const void *s) { return n_bind_st(c, 1, s); }   // color
+static uint32_t n_bindst2(void *c, const void *s) { return n_bind_st(c, 2, s); }   // channel mask
+static uint32_t n_bindst3(void *c, const void *s) { return n_bind_st(c, 3, s); }   // multisample
+static uint32_t n_bindst4(void *c, const void *s) { return n_bind_st(c, 4, s); }   // polygon
+static uint32_t n_bindst5(void *c, const void *s) { return n_bind_st(c, 5, s); }   // depth stencil
+static uint32_t n_bind_vattr(void *c, int n, const void *st) {   // BindVertexAttribState(c, n, st)：每项 4B
+    if (n < 0 || n > 16 || !st) return 0;
+    p_bind_vattr_t *r = nop_rec(c, NOP_BIND_VATTR, sizeof *r);
+    r->first = 0; r->n = n; memcpy(r->st, st, 4 * (size_t)n);
+    return 0;
+}
+static uint32_t n_bind_vstream(void *c, int n, const void *st) {   // BindVertexStreamState(c, n, st)：每项 8B
+    if (n < 0 || n > 16 || !st) return 0;
+    p_bind_vstream_t *r = nop_rec(c, NOP_BIND_VSTREAM, sizeof *r);
+    r->first = 0; r->n = n; memcpy(r->st, st, 8 * (size_t)n);
+    return 0;
+}
+static uint32_t n_bind_vbuf(void *c, int first, int n, const void *rg) {   // BindVertexBuffers(c, first, n, ranges)
+    if (n < 0 || first < 0 || first + n > 16 || !rg) return 0;
+    p_bind_vbuf_t *r = nop_rec(c, NOP_BIND_VBUF, sizeof *r);
+    r->first = first; r->n = n;
+    for (int i = 0; i < n; i++) {
+        memcpy(&r->addr[i], (const uint8_t *)rg + 16 * i, 8);
+        memcpy(&r->size[i], (const uint8_t *)rg + 16 * i + 8, 8);
+    }
+    return 0;
+}
+static uint32_t n_bind_ubo1(void *c, int st, int i, uint64_t a, uint64_t n) {   // BindUniformBuffer(c, stage, index, addr, size)
+    p_bind_buf_t *r = nop_rec(c, NOP_BIND_UBO, sizeof *r); r->stage = st; r->index = i; r->addr = a; r->size = n; return 0;
+}
+static uint32_t n_bind_ssbo1(void *c, int st, int i, uint64_t a, uint64_t n) {   // BindStorageBuffer(c, stage, index, addr, size)
+    p_bind_buf_t *r = nop_rec(c, NOP_BIND_SSBO, sizeof *r); r->stage = st; r->index = i; r->addr = a; r->size = n; return 0;
+}
+static uint32_t n_bind_bufs(void *c, int st, int first, int n, const void *rg) {   // 复数版（UBO/SSBO 同形）：逐项展开
+    if (n < 0 || n > 16 || !rg) return 0;
+    for (int i = 0; i < n; i++) {
+        uint64_t a, s;
+        memcpy(&a, (const uint8_t *)rg + 16 * i, 8);
+        memcpy(&s, (const uint8_t *)rg + 16 * i + 8, 8);
+        p_bind_buf_t *r = nop_rec(c, NOP_BIND_UBO, sizeof *r);
+        r->stage = st; r->index = first + i; r->addr = a; r->size = s;
+    }
+    return 0;
+}
 static uint64_t n_buf_getsize(const void *b) { return *(const uint64_t *)((const uint8_t *)b + 0x18); }
-// —— 绘制提交族（真绘制指令已到达：DrawElements/BindProgram/CopyB2T/Uniform……记录语义放行）
+// —— 绘制提交族（真记录：参数按真实 NVN ABI 逐名取位——旧桩曾把 DrawElements 错配 3 参版、
+// UpdateUniformBuffer 错位、CopyB2B 反序，此处一并修正）
 static uint64_t g_texpool_seq;
 static uint64_t n_dev_gettexhandle(const void *d, const void *t, const void *s) { (void)d; (void)t; (void)s; return 0x70000000ull | ++g_texpool_seq; }
-static uint32_t n_cb_draw(void *c, int pr, int first, int n) { (void)c; (void)pr; (void)first; (void)n; return 0; }   // DrawArrays/DrawElements 共形
-static uint32_t n_cb_drawidx(void *c, int pr, int it, int n, uint64_t ib, int bv, int bi, int inst) { (void)c;(void)pr;(void)it;(void)n;(void)ib;(void)bv;(void)bi;(void)inst; return 0; }
-static uint32_t n_cb_bindprog(void *c, const void *p, int stages) { (void)c; (void)p; (void)stages; return 0; }
-static uint32_t n_cb_bindbufs(void *c, int st, int first, int n, const void *rg) { (void)c;(void)st;(void)first;(void)n;(void)rg; return 0; }
-static uint32_t n_cb_clearcolor(void *c, int i, const float *rgba, int mask) { (void)c;(void)i;(void)rgba;(void)mask; return 0; }
-static uint32_t n_cb_cleards(void *c, float d, uint32_t dm, int s, int sm) { (void)c;(void)d;(void)dm;(void)s;(void)sm; return 0; }
-static uint32_t n_cb_stencil(void *c, int f, int v) { (void)c; (void)f; (void)v; return 0; }
-static uint32_t n_cb_polyoff(void *c, float fa, float un, float cl) { (void)c;(void)fa;(void)un;(void)cl; return 0; }
-static uint32_t n_cb_barrier(void *c, int bits) { (void)c; (void)bits; return 0; }
-static uint32_t n_cb_b2t(void *c, uint64_t src, const void *t, const void *v, const void *r, int fl) { (void)c;(void)src;(void)t;(void)v;(void)r;(void)fl; return 0; }
-static uint32_t n_cb_b2b(void *c, uint64_t dst, uint64_t src, uint64_t n, int fl) { (void)c;(void)dst;(void)src;(void)n;(void)fl; return 0; }
-static uint32_t n_cb_updubo(void *c, int st, int i, const void *data, uint64_t n, uint64_t off) { (void)c;(void)st;(void)i;(void)data;(void)n;(void)off; return 0; }
+static uint32_t n_draw_arrays(void *c, int pr, int first, int n) {   // DrawArrays(c, pr, first, count)
+    p_draw_t *r = nop_rec(c, NOP_DRAW, sizeof *r); r->prim = pr; r->first = first; r->count = n; return 0;
+}
+static void rec_drawidx(void *c, int pr, int it, int n, uint64_t ib, int bv, int bi, int inst) {
+    p_draw_idx_t *r = nop_rec(c, NOP_DRAW_IDX, sizeof *r);
+    r->prim = pr; r->itype = it; r->count = n; r->base_vertex = bv; r->base_instance = bi; r->instances = inst; r->ibuf = ib;
+}
+static uint32_t n_draw_e(void *c, int pr, int it, int n, uint64_t ib) { rec_drawidx(c, pr, it, n, ib, 0, 0, 0); return 0; }   // DrawElements(c, pr, it, count, ib)
+static uint32_t n_draw_ebv(void *c, int pr, int it, int n, uint64_t ib, int bv) { rec_drawidx(c, pr, it, n, ib, bv, 0, 0); return 0; }   // +baseVertex
+static uint32_t n_draw_einst(void *c, int pr, int it, int n, uint64_t ib, int a, int b, int inst) { rec_drawidx(c, pr, it, n, ib, a, b, inst); return 0; }   // Instanced（8 参：bv/bi/inst）
+static uint32_t n_draw_ainst(void *c, int pr, int first, int n, int bi, int inst) {   // DrawArraysInstanced(c, pr, first, count, baseInstance, instances)
+    p_draw_idx_t *r = nop_rec(c, NOP_DRAW_IDX, sizeof *r);
+    r->prim = pr; r->itype = -1; r->count = n; r->base_vertex = first; r->base_instance = bi; r->instances = inst; r->ibuf = 0;
+    return 0;
+}
+static uint32_t n_cb_bindprog(void *c, const void *p, int stages) {
+    p_bind_program_t *r = nop_rec(c, NOP_BIND_PROGRAM, sizeof *r); r->prog = p; r->stages = stages; return 0;
+}
+static uint32_t n_cb_clearcolor(void *c, int i, const float *rgba, int mask) {
+    p_clear_color_t *r = nop_rec(c, NOP_CLEAR_COLOR, sizeof *r); r->index = i; r->mask = mask; if (rgba) memcpy(r->rgba, rgba, 16); return 0;
+}
+static uint32_t n_cb_cleards(void *c, float d, int dm, int s, int sm) {   // ClearDepthStencil(c, depth, dmask, stencil, smask)
+    p_clear_ds_t *r = nop_rec(c, NOP_CLEAR_DS, sizeof *r); r->depth = d; r->depth_mask = dm; r->stencil = s; r->stencil_mask = sm; return 0;
+}
+static void rec_stencil(void *c, int which, int f, int a, int b, int v) {
+    p_stencil_t *r = nop_rec(c, NOP_STENCIL, sizeof *r);
+    r->face = f; r->which = which; r->value_mask = a; r->mask = b; r->ref = v;
+}
+static uint32_t n_st_vm(void *c, int f, int m) { rec_stencil(c, 0, f, m, 0, 0); return 0; }    // SetStencilValueMask
+static uint32_t n_st_m(void *c, int f, int m) { rec_stencil(c, 1, f, 0, m, 0); return 0; }     // SetStencilMask
+static uint32_t n_st_ref(void *c, int f, int v) { rec_stencil(c, 2, f, 0, 0, v); return 0; }   // SetStencilRef
+static uint32_t n_cb_polyoff(void *c, float fa, float un, float cl) {   // SetPolygonOffsetClamp(c, factor, units, clamp)
+    p_poly_offset_t *r = nop_rec(c, NOP_POLY_OFFSET, sizeof *r); r->factor = fa; r->units = un; r->clamp = cl; return 0;
+}
+static uint32_t n_cb_barrier(void *c, int bits) {
+    int32_t *r = nop_rec(c, NOP_BARRIER, 8); *r = bits; return 0;
+}
+static uint32_t n_cb_b2t(void *c, uint64_t src, const void *t, const void *v, const void *rg, int fl) {   // CopyBufferToTexture(c, src, tex, view, region, flags)
+    p_copy_b2t_t *r = nop_rec(c, NOP_COPY_B2T, sizeof *r);
+    r->src = src; r->tex = t; vsnap(&r->view, &r->has_view, v); if (rg) memcpy(&r->r, rg, sizeof(nregion_t)); r->flags = fl;
+    return 0;
+}
+static uint32_t n_cb_t2b(void *c, const void *t, const void *v, const void *rg, uint64_t dst, int fl) {   // CopyTextureToBuffer(c, tex, view, region, dst, flags)
+    p_copy_b2t_t *r = nop_rec(c, NOP_COPY_T2B, sizeof *r);
+    r->src = dst; r->tex = t; vsnap(&r->view, &r->has_view, v); if (rg) memcpy(&r->r, rg, sizeof(nregion_t)); r->flags = fl;
+    return 0;
+}
+static uint32_t n_cb_b2b(void *c, uint64_t src, uint64_t dst, uint64_t n, int fl) {   // CopyBufferToBuffer(c, src, dst, size, flags)
+    uint8_t *p = nop_rec(c, NOP_COPY_B2B, 32);
+    memcpy(p, &src, 8); memcpy(p + 8, &dst, 8); memcpy(p + 16, &n, 8); memcpy(p + 24, &fl, 4);
+    return 0;
+}
+static uint32_t n_cb_updubo(void *c, uint64_t buf, uint64_t bufsz, int64_t off, uint64_t n, const void *data) {   // UpdateUniformBuffer(c, buf, bufsz, off, n, data)
+    (void)bufsz;
+    uint8_t *p = nop_rec(c, NOP_UPDATE_UB, (uint32_t)(24 + n));
+    uint64_t dbuf = buf + (uint64_t)off, nn = n;
+    memcpy(p, &dbuf, 8); memcpy(p + 8, &nn, 8);
+    if (data && n) memcpy(p + 16, data, n);
+    return 0;
+}
 static uint32_t n_queue_label(void *q, const char *l) { (void)q; (void)l; return 0; }
 static void n_buf_label(void *b, const char *l) { (void)b; (void)l; }
 // 注意：不 memset 整对象——Unity 的命令缓冲对象（实证 0xe0 字节）同时携带其他字段
@@ -2123,10 +2277,10 @@ static void *h_nvn_bootstrap(const char *name) {
         {"nvnCommandBufferGetControlMemorySize", (void *)n_cb_memfree},
         {"nvnCommandBufferGetControlMemoryUsed", (void *)n_cb_memused},
         {"nvnCommandBufferSetTexturePool", (void *)n_cb_setpool},
-        {"nvnCommandBufferSetSamplerPool", (void *)n_cb_setpool},
-        {"nvnCommandBufferSetShaderScratchMemory", (void *)n_cb_setpool},
+        {"nvnCommandBufferSetSamplerPool", (void *)n_cb_setsamppool},
+        {"nvnCommandBufferSetShaderScratchMemory", (void *)n_scratch},
         {"nvnCommandBufferFenceSync", (void *)n_cb_fence},
-        {"nvnCommandBufferWaitSync", (void *)n_cb_fence},
+        {"nvnCommandBufferWaitSync", (void *)n_cb_waitsync},
         // 描述符池
         {"nvnTexturePoolInitialize", (void *)n_tpool_init},
         {"nvnSamplerPoolInitialize", (void *)n_tpool_init},
@@ -2254,39 +2408,39 @@ static void *h_nvn_bootstrap(const char *name) {
         {"nvnMultisampleStateGetSamples", (void *)n_ms_getsamples},
         {"nvnMultisampleStateGetMultisampleEnable", (void *)n_ms_getenable},
         {"nvnColorStateSetLogicOp", (void *)n_co_setlogicop},
-        {"nvnCommandBufferBindBlendState", (void *)n_cb_bindstate},
-        {"nvnCommandBufferBindColorState", (void *)n_cb_bindstate},
-        {"nvnCommandBufferBindChannelMaskState", (void *)n_cb_bindstate},
-        {"nvnCommandBufferBindMultisampleState", (void *)n_cb_bindstate},
-        {"nvnCommandBufferBindPolygonState", (void *)n_cb_bindstate},
-        {"nvnCommandBufferBindDepthStencilState", (void *)n_cb_bindstate},
-        {"nvnCommandBufferBindVertexAttribState", (void *)n_cb_bindstate},
-        {"nvnCommandBufferBindVertexStreamState", (void *)n_cb_bindstate},
+        {"nvnCommandBufferBindBlendState", (void *)n_bindst0},
+        {"nvnCommandBufferBindColorState", (void *)n_bindst1},
+        {"nvnCommandBufferBindChannelMaskState", (void *)n_bindst2},
+        {"nvnCommandBufferBindMultisampleState", (void *)n_bindst3},
+        {"nvnCommandBufferBindPolygonState", (void *)n_bindst4},
+        {"nvnCommandBufferBindDepthStencilState", (void *)n_bindst5},
+        {"nvnCommandBufferBindVertexAttribState", (void *)n_bind_vattr},
+        {"nvnCommandBufferBindVertexStreamState", (void *)n_bind_vstream},
         {"nvnBufferGetSize", (void *)n_buf_getsize},
         {"nvnBufferSetDebugLabel", (void *)n_buf_label},
         {"nvnDeviceGetTextureHandle", (void *)n_dev_gettexhandle},
         {"nvnDeviceGetSamplerHandle", (void *)n_dev_gettexhandle},
         {"nvnDeviceGetTexelFactorHandle", (void *)n_dev_gettexhandle},
-        {"nvnCommandBufferDrawArrays", (void *)n_cb_draw},
-        {"nvnCommandBufferDrawElements", (void *)n_cb_draw},
-        {"nvnCommandBufferDrawElementsBaseVertex", (void *)n_cb_drawidx},
-        {"nvnCommandBufferDrawElementsInstancedBaseVertex", (void *)n_cb_drawidx},
-        {"nvnCommandBufferDrawArraysInstanced", (void *)n_cb_drawidx},
+        {"nvnCommandBufferDrawArrays", (void *)n_draw_arrays},
+        {"nvnCommandBufferDrawElements", (void *)n_draw_e},
+        {"nvnCommandBufferDrawElementsBaseVertex", (void *)n_draw_ebv},
+        {"nvnCommandBufferDrawElementsInstancedBaseVertex", (void *)n_draw_einst},
+        {"nvnCommandBufferDrawArraysInstanced", (void *)n_draw_ainst},
         {"nvnCommandBufferBindProgram", (void *)n_cb_bindprog},
-        {"nvnCommandBufferBindUniformBuffer", (void *)n_cb_bindbufs},
-        {"nvnCommandBufferBindUniformBuffers", (void *)n_cb_bindbufs},
-        {"nvnCommandBufferBindStorageBuffer", (void *)n_cb_bindbufs},
-        {"nvnCommandBufferBindStorageBuffers", (void *)n_cb_bindbufs},
-        {"nvnCommandBufferBindVertexBuffers", (void *)n_cb_bindbufs},
+        {"nvnCommandBufferBindUniformBuffer", (void *)n_bind_ubo1},
+        {"nvnCommandBufferBindUniformBuffers", (void *)n_bind_bufs},
+        {"nvnCommandBufferBindStorageBuffer", (void *)n_bind_ssbo1},
+        {"nvnCommandBufferBindStorageBuffers", (void *)n_bind_bufs},
+        {"nvnCommandBufferBindVertexBuffers", (void *)n_bind_vbuf},
         {"nvnCommandBufferClearColor", (void *)n_cb_clearcolor},
         {"nvnCommandBufferClearDepthStencil", (void *)n_cb_cleards},
-        {"nvnCommandBufferSetStencilValueMask", (void *)n_cb_stencil},
-        {"nvnCommandBufferSetStencilMask", (void *)n_cb_stencil},
-        {"nvnCommandBufferSetStencilRef", (void *)n_cb_stencil},
+        {"nvnCommandBufferSetStencilValueMask", (void *)n_st_vm},
+        {"nvnCommandBufferSetStencilMask", (void *)n_st_m},
+        {"nvnCommandBufferSetStencilRef", (void *)n_st_ref},
         {"nvnCommandBufferSetPolygonOffsetClamp", (void *)n_cb_polyoff},
         {"nvnCommandBufferBarrier", (void *)n_cb_barrier},
         {"nvnCommandBufferCopyBufferToTexture", (void *)n_cb_b2t},
-        {"nvnCommandBufferCopyTextureToBuffer", (void *)n_cb_b2t},
+        {"nvnCommandBufferCopyTextureToBuffer", (void *)n_cb_t2b},
         {"nvnCommandBufferCopyBufferToBuffer", (void *)n_cb_b2b},
         {"nvnCommandBufferUpdateUniformBuffer", (void *)n_cb_updubo},
         {"nvnQueueSetDebugLabel", (void *)n_queue_label},
@@ -2294,7 +2448,7 @@ static void *h_nvn_bootstrap(const char *name) {
         {"nvnSamplerPoolSetDebugLabel", (void *)n_tpool_label},
         // 队列-同步
         {"nvnQueueFenceSync", (void *)n_cb_fence},
-        {"nvnQueueWaitSync", (void *)n_cb_fence},
+        {"nvnQueueWaitSync", (void *)n_cb_waitsync},
         // 缓冲
         {"nvnBufferBuilderSetDefaults", (void *)n_bb_setdefaults},
         {"nvnBufferBuilderSetDevice", (void *)n_bb_setdevice},
