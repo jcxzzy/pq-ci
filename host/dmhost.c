@@ -386,6 +386,28 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
         }
         fprintf(stderr, " 共 %llu 节点%s\n", (unsigned long long)total, guard >= 100000 ? "（封顶）" : "");
     }
+    // 池分配器探针（楔死根因取证）：0x186bb0c 建完成表时调 0x18ce88c(池号,0x3000) 分配 512×0x18 项链表，
+    // 返回 0 → 错误 0x34 → 完成注册表永远空。表基 = *(*(main+0x2b34710))，每池 0x68：[0x50]=堆对象
+    // [0x58]=档位(≥5 走大块路径) [0x5c]=累计字节。堆=0 即初始化从未发生；累计巨大即耗尽/泄漏。
+    {
+        static int pool_probes;
+        if (pool_probes++ < 6) {
+            uint64_t gb = (uint64_t)(uintptr_t)g_mod[0].base;
+            uint64_t tb = rd64_checked((void *)(uintptr_t)(gb + 0x2b34710));
+            uint64_t base = tb ? rd64_checked((void *)(uintptr_t)tb) : 0;
+            uint64_t pidp = rd64_checked((void *)(uintptr_t)(gb + 0x2b33f18));
+            uint64_t pid = pidp ? (rd64_checked((void *)(uintptr_t)pidp) & 0xffffffff) : (uint64_t)-1;
+            fprintf(stderr, "[dm] 池表 基=%#llx 当前池号=%llu：", (unsigned long long)base, (unsigned long long)pid);
+            if (base) {
+                for (int i = 0; i < 8; i++)
+                    fprintf(stderr, " 池%d[堆=%#llx 档=%u 累计=%#x]", i,
+                            (unsigned long long)rd64_checked((void *)(uintptr_t)(base + 0x68 * i + 0x50)),
+                            (unsigned)(rd64_checked((void *)(uintptr_t)(base + 0x68 * i + 0x58)) & 0xffffffff),
+                            (unsigned)(rd64_checked((void *)(uintptr_t)(base + 0x68 * i + 0x5c)) & 0xffffffff));
+            }
+            fputc('\n', stderr);
+        }
+    }
     int sampled = 0;
     for (thr_t *t = g_thr_all; t && sampled < 10; t = t->all) {   // 采样封顶 10 个存活：主线程优先 + 最老 9 个
         if (t->exited || t->parked) continue;
