@@ -379,8 +379,9 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
         uint64_t total = 0, guard = 0;
         while (n && ptr_readable((void *)(uintptr_t)n) && guard++ < 100000) {
             if (total < 6)
-                fprintf(stderr, " [%#llx t=%d]", (unsigned long long)n,
-                        (int)(rd64_checked((void *)(uintptr_t)(n + 8)) & 0xffffffff));
+                fprintf(stderr, " [%#llx t=%d cb=%#llx]", (unsigned long long)n,
+                        (int)(rd64_checked((void *)(uintptr_t)(n + 8)) & 0xffffffff),
+                        (unsigned long long)(rd64_checked((void *)(uintptr_t)(n + 0x38)) - (uint64_t)(uintptr_t)g_mod[0].base));
             n = rd64_checked((void *)(uintptr_t)n);
             total++;
         }
