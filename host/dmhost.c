@@ -201,6 +201,9 @@ enum { H_NONE = 0, H_THREAD, H_EVENT, H_FAKE };
 static struct { int type; void *obj; } g_htab[MAX_H];
 static pthread_mutex_t G = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t GV = PTHREAD_COND_INITIALIZER;
+// svc#28 等待键登记（文件域：驱动侧完成唤醒 host_wake_pool_waits 走查；定义在后部）
+static struct { uint64_t key; uint64_t mut; int n; } g_keyw[64];
+void host_wake_pool_waits(void);
 static thr_t *g_thr_all;
 static thr_t *g_thr_main;
 static __thread thr_t *t_cur;
@@ -738,7 +741,6 @@ static uint64_t svc_impl(int num, uint64_t *x) {
                 LOG("svc#28 等待点[%d] %s+%#llx", nseen - 1, mn, (unsigned long long)off);
             }
         }
-        static struct { uint64_t key; int n; } g_keyw[64];
         volatile uint32_t *km = (volatile uint32_t *)(uintptr_t)x[1];
         uint32_t tag = (uint32_t)x[2];
         int ki = -1;
@@ -747,7 +749,7 @@ static uint64_t svc_impl(int num, uint64_t *x) {
             if (ki < 0 && !g_keyw[i].n) ki = i;
         }
         if (ki < 0) ki = 0;
-        g_keyw[ki].key = (uint64_t)km; g_keyw[ki].n++;
+        g_keyw[ki].key = (uint64_t)km; g_keyw[ki].mut = (uint64_t)(uintptr_t)x[0]; g_keyw[ki].n++;
         struct timespec dl = deadline_from((int64_t)x[3]);
         pthread_mutex_lock(&G);
         volatile uint32_t *m = (volatile uint32_t *)(uintptr_t)x[0];
@@ -1764,6 +1766,30 @@ static uint32_t n_queue_init(void *q, const void *b) {
     return 1;
 }
 static uint32_t n_queue_finalize(void *q) { LOG("nvn QueueFinalize %p", q); *(uint32_t *)q = 0; return 0; }
+// —— 驱动侧完成唤醒（nvn_mtl.m 完成回调调用；表 g_keyw 定义在文件前部）——
+// CI 实证：h=0x11d 线程卡 _pthread_cond_wait（svc#28），等待地址落在 NVN MemoryPool 区
+// （0x428xxxxxx），等的是真机上 NVN 驱动在 GPU 完成时写的状态字（sdk+0x867cc 双检环：
+// 状态字节 obj+0x10 非 0 即完成、u16@0x12=结果码）。宿主即驱动：完成时写状态字 +
+// 按 svc#29 协议清键广播。只动池区键——游戏内部同步键误清会造成假唤醒。
+void host_wake_pool_waits(void) {
+    static int n_woken;
+    int woken = 0;
+    pthread_mutex_lock(&G);
+    for (int i = 0; i < 64; i++) {
+        if (!g_keyw[i].n || g_keyw[i].key < 0x400000000ull || g_keyw[i].key >= 0x500000000ull) continue;
+        // SDK 双检环对象：互斥@obj+0x1c，键@obj+0x20（键=互斥+4，实证）；状态字节 obj+0x10
+        uint64_t obj = g_keyw[i].mut - 0x1c;
+        volatile uint8_t *st = (volatile uint8_t *)(uintptr_t)(obj + 0x10);
+        if (ptr_readable((void *)(uintptr_t)st)) {
+            *st = 1;   // 完成（结果 u16@obj+0x12 保持 0=成功）
+            *(volatile uint32_t *)(uintptr_t)g_keyw[i].key = 0;   // svc#29：清键
+            woken++;
+        }
+    }
+    if (woken) pthread_cond_broadcast(&GV);
+    pthread_mutex_unlock(&G);
+    if (woken && n_woken++ < 8) LOG("驱动侧完成唤醒：%d 个池区等待键（mtl 完成）", woken);
+}
 static uint32_t n_queue_geterror(void *q, void *info) { (void)q; if (info) memset(info, 0, 0x18); return 0; }
 // —— Metal 回放层（nvn_mtl.m）：真提交 + 完成回流（第一阶段骨架） ——
 extern void mtl_submit_chains(void *const *handles, int n, void **syncs, int nsync);
