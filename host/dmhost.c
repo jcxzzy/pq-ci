@@ -3024,7 +3024,12 @@ static void load_modules(const char *dir, const char **names, int n) {
             static const uint32_t loop_nops[] = {0x185d7c0, 0x185da4c, 0x185da8c};
             int np = 0;
             for (unsigned k = 0; k < sizeof loop_nops / sizeof loop_nops[0]; k++)
-                if (loop_nops[k] + 4 <= m->text_end) { *(uint32_t *)((uint8_t *)m->base + loop_nops[k]) = nop; np++; }
+                if (loop_nops[k] + 4 <= m->text_end) {
+                    void *p = (uint8_t *)m->base + loop_nops[k];
+                    *(uint32_t *)p = nop;
+                    __builtin___clear_cache((char *)p - 64, (char *)p + 64);   // arm64 I-cache 不连贯——不清则 CPU 执行旧指令
+                    np++;
+                }
             LOG("解楔补丁：注册表扫描环回边 NOP ×%d（0x185d7c0/0x185da4c/0x185da8c）", np);
         }
         uint64_t rx = (m->text_end + PAGE - 1) & ~(uint64_t)(PAGE - 1);
