@@ -6,6 +6,7 @@
 // 回放编码（B2T 纹理上传 / 清屏 / 绘制）按里程碑逐阶段长入；着色器微码→MSL 在后续步骤。
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <objc/runtime.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -33,6 +34,15 @@ int mtl_init(void) {
         atomic_store(&g_mtl_mode, (g_mdev && g_mq) ? 1 : 2);
         g_simq = dispatch_queue_create("dm.mtl.sim", DISPATCH_QUEUE_SERIAL);
     }
+    // 驱动心跳：真机上 NVN 驱动是常驻推进的——周期性唤醒池区等待者（队列完成协议），
+    // 否则 gfx 线程在 SDK 内部等「下一次完成」而下次提交又依赖它自己跑起来（CI 实证死环）。
+    extern void host_wake_pool_waits(void);
+    dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, g_simq);
+    dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC),
+                              50 * NSEC_PER_MSEC, 10 * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(t, ^{ host_wake_pool_waits(); });
+    dispatch_resume(t);
+    objc_setAssociatedObject((id)g_simq, "dm.mtl.hb", t, OBJC_ASSOCIATION_RETAIN);
     fprintf(stderr, "[dm] mtl_init: mode=%d dev=%p（1=真 Metal，2=软件完成模拟——无 GPU 环境）\n",
             atomic_load(&g_mtl_mode), (__bridge void *)g_mdev);
     return atomic_load(&g_mtl_mode);
