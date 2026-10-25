@@ -39,9 +39,12 @@ int mtl_init(void) {
 }
 
 static void sim_signal(void **syncs, int nsync) {   // 在模拟完成线程上信号化
+    extern void nvn_sync_mark_signaled(void *sync);
+    extern void host_wake_pool_waits(void);
     for (int i = 0; i < nsync; i++)
         if (syncs[i]) nvn_sync_mark_signaled(syncs[i]);
     free(syncs);
+    host_wake_pool_waits();   // 驱动侧完成：唤醒池区条件键等待者（NVN 队列完成协议）
 }
 
 // 提交一批记录链（句柄 = BEGIN 记录地址）+ 本批 FenceSync 的 sync 对象。
