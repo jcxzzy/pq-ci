@@ -406,7 +406,36 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
             }
         }
     }
-    // 池分配器探针（楔死根因取证）：0x186bb0c 建完成表时调 0x18ce88c(池号,0x3000) 分配 512×0x18 项链表，
+    // 双链分辨：遍历器实际走 B 链 *(*(main+0x2b341f8))（0x185d6d4），上面 A 链可能是另一条。
+    // 注册表 = *(*(main+0x2b34170))：{arr@0 count@8 cap@0xc}——type==1 节点向它插条目。
+    {
+        static int b_probes;
+        if (b_probes++ < 6) {
+            uint64_t gb = (uint64_t)(uintptr_t)g_mod[0].base;
+            uint64_t hb = rd64_checked((void *)(uintptr_t)(gb + 0x2b341f8));
+            uint64_t bhead = hb ? rd64_checked((void *)(uintptr_t)hb) : 0;
+            uint64_t n = bhead, total = 0, guard = 0;
+            fprintf(stderr, "[dm] B链(遍历器) 头=%#llx：", (unsigned long long)bhead);
+            while (n && ptr_readable((void *)(uintptr_t)n) && guard++ < 5000) {
+                if (total < 4)
+                    fprintf(stderr, " [%#llx t=%d]", (unsigned long long)n,
+                            (int)(rd64_checked((void *)(uintptr_t)(n + 8)) & 0xffffffff));
+                n = rd64_checked((void *)(uintptr_t)n);
+                total++;
+            }
+            fprintf(stderr, " 共 %llu 节点\n", (unsigned long long)total);
+            uint64_t rp = rd64_checked((void *)(uintptr_t)(gb + 0x2b34170));
+            uint64_t reg = rp ? rd64_checked((void *)(uintptr_t)rp) : 0;
+            if (reg && ptr_readable((void *)(uintptr_t)reg))
+                fprintf(stderr, "[dm] 注册表 arr=%#llx count=%llu cap=%llu\n",
+                        (unsigned long long)rd64_checked((void *)(uintptr_t)reg),
+                        (unsigned long long)(rd64_checked((void *)(uintptr_t)(reg + 8)) & 0xffffffff),
+                        (unsigned long long)(rd64_checked((void *)(uintptr_t)(reg + 0xc)) & 0xffffffff));
+            else
+                fprintf(stderr, "[dm] 注册表 未建立（*0x2b34170=%#llx → %#llx）\n",
+                        (unsigned long long)rp, (unsigned long long)reg);
+        }
+    }
     // 返回 0 → 错误 0x34 → 完成注册表永远空。表基 = *(*(main+0x2b34710))，每池 0x68：[0x50]=堆对象
     // [0x58]=档位(≥5 走大块路径) [0x5c]=累计字节。堆=0 即初始化从未发生；累计巨大即耗尽/泄漏。
     {
