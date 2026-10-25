@@ -110,7 +110,7 @@ static void watchdog(int sig, siginfo_t *si, void *uc_) {
         where_of(g_beat_pc, w, sizeof w);
         fprintf(stderr, "[dm] 心跳打断点 pc=%#llx(%s)\n", (unsigned long long)g_beat_pc, w);
     }
-    if (++wd_beats > 8) {   // 判定先行：转储可能因线程数暴涨而耗时，绝不能拖过时限
+    if (++wd_beats > 13) {   // 判定先行：转储可能因线程数暴涨而耗时，绝不能拖过时限（13 拍 < 15m job 限；留缓冲给在飞大扫描收尾）
         fprintf(stderr, "[dm] 看门狗最终到期（第 %d 拍）\n", wd_beats);
         _exit(71);
     }
