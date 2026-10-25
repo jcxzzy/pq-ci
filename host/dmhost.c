@@ -445,44 +445,8 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
                 fprintf(stderr, "[dm] B链清头手术（拍 %d）：头 %#llx（%llu 节点）→ 空\n",
                         b_probes, (unsigned long long)bhead, (unsigned long long)total);
             }
-            // —— 终极：运行时补丁客体代码。入口桩（未来调用即时返回）+ 环回边 NOP（在飞
-            // 循环下一次迭代即跳出——入口桩对在飞无效，实证）。t1 扫描环 0x185d7c0、
-            // t2 扫描环 0x185da4c、t4 环 0x185da8c、走查节点环 0x185d738 NOP 后一次即出。
-            // 与链头无关（头清空后仍须补丁在飞轮），独立于 bhead 执行至完成。
-            if (b_probes >= 5) {
-                static const struct { uint32_t off; uint32_t w0, w1; int stub; } k_pats[] = {
-                    {0x185d6c8, 0x52800020u, 0xd65f03c0u, 1},   // 走查器入口 → movz w0,#1; ret
-                    {0x185d74c, 0x52800020u, 0xd65f03c0u, 1},   // t1 处理器入口
-                    {0x185d980, 0x52800020u, 0xd65f03c0u, 1},   // t2/t5 处理器入口
-                    {0x185d7c0, 0xd503201fu, 0, 0},             // t1 扫描环回边 → NOP
-                    {0x185da4c, 0xd503201fu, 0, 0},             // t2 扫描环回边 → NOP
-                    {0x185da8c, 0xd503201fu, 0, 0},             // t4 扫描环回边 → NOP
-                    {0x185d738, 0xd503201fu, 0, 0},             // 走查节点环回边 → NOP（一节点即返）
-                };
-                static int done_pats;
-                if (!done_pats) {
-                    int patched = 0;
-                    for (unsigned k = 0; k < sizeof k_pats / sizeof k_pats[0]; k++) {
-                        void *p = (void *)(uintptr_t)(gb + k_pats[k].off);
-                        if (!ptr_readable(p)) continue;
-                        if (mprotect((void *)((uintptr_t)p & ~0xfffull), 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-                            LOG("代码补丁 mprotect 失败 @%#x errno=%d", k_pats[k].off, errno);
-                            continue;
-                        }
-                        *(volatile uint32_t *)p = k_pats[k].w0;
-                        if (k_pats[k].stub) *(volatile uint32_t *)((uint8_t *)p + 4) = k_pats[k].w1;
-                        __builtin___clear_cache((char *)p, (char *)p + 8);
-                        mprotect((void *)((uintptr_t)p & ~0xfffull), 0x1000, PROT_READ | PROT_EXEC);
-                        patched++;
-                    }
-                    if (patched == (int)(sizeof k_pats / sizeof k_pats[0])) {
-                        done_pats = 1;
-                        fprintf(stderr, "[dm] 代码补丁完成：%d 处（3 入口桩 + 4 环回边 NOP）\n", patched);
-                    } else {
-                        fprintf(stderr, "[dm] 代码补丁部分：%d/%d 处（下拍重试）\n", patched, (int)(sizeof k_pats / sizeof k_pats[0]));
-                    }
-                }
-            }
+            // （运行时代码补丁已废——macOS 拒运行时 RWX（mprotect EINVAL，CI 实证）；
+            // 解楔改为装载期 RW 窗口 NOP 扫描环回边，见 load_modules。）
             // 最新节点（地址最小=池递减分配）：完整 0x48 字节 + 回调符号化——认出生产者载荷
             {
                 uint64_t n2 = bhead, newest = 0;
@@ -3050,6 +3014,19 @@ static void load_modules(const char *dir, const char **names, int n) {
         close(fd);
         install_key_page(m);
         obs_patch(m);   // text 封 RX 前打观测门（main 的 il2cpp os::File 分支边）
+        if (!i) {   // 解楔补丁（RW 窗口期，mprotect 前）：NOP 订阅注册表三个扫描环回边
+            // —— CI 实证因果链：装载 worker 风暴订阅（键含唯一参数永不去重）→注册表膨胀至
+            // 百万→每节点扫描 O(百万)→走查永不收尾→完成表 0x186bb0c 永不初始化→worker 的
+            // 完成事件永不发布→风暴加剧。NOP 回边=扫描一次即出（O(1)），走查 O(n) 完成，
+            // 事件系统保留功能（首条匹配语义），死锁从根断。macOS 拒运行时 RWX（EINVAL），
+            // 只能装载期改。
+            static const uint32_t nop = 0xd503201fu;
+            static const uint32_t loop_nops[] = {0x185d7c0, 0x185da4c, 0x185da8c};
+            int np = 0;
+            for (unsigned k = 0; k < sizeof loop_nops / sizeof loop_nops[0]; k++)
+                if (loop_nops[k] + 4 <= m->text_end) { *(uint32_t *)((uint8_t *)m->base + loop_nops[k]) = nop; np++; }
+            LOG("解楔补丁：注册表扫描环回边 NOP ×%d（0x185d7c0/0x185da4c/0x185da8c）", np);
+        }
         uint64_t rx = (m->text_end + PAGE - 1) & ~(uint64_t)(PAGE - 1);
         if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
         if (mprotect(m->base + (m->patch_off & ~(uint64_t)(PAGE - 1)), m->size - (m->patch_off & ~(uint64_t)(PAGE - 1)), PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
