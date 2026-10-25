@@ -18,6 +18,8 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
+#define _DARWIN_C_SOURCE
+#include <dlfcn.h>
 #include <unistd.h>
 
 #define MAX_MOD 8
@@ -386,6 +388,23 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
             total++;
         }
         fprintf(stderr, " 共 %llu 节点%s\n", (unsigned long long)total, guard >= 100000 ? "（封顶）" : "");
+        // 首节点原始 0x48 字节 + cb 符号化：确认节点布局与跳板身份
+        if (head && ptr_readable((void *)(uintptr_t)head)) {
+            fprintf(stderr, "[dm] 首节点 %#llx 原始：", (unsigned long long)head);
+            for (int o = 0; o < 0x48; o += 8)
+                fprintf(stderr, " +%#x:%#llx", o, (unsigned long long)rd64_checked((void *)(uintptr_t)(head + o)));
+            fputc('\n', stderr);
+            uint64_t cb = rd64_checked((void *)(uintptr_t)(head + 0x38));
+            if (cb) {
+                Dl_info di;
+                if (dladdr((void *)(uintptr_t)cb, &di) && di.dli_sname)
+                    fprintf(stderr, "[dm] 首节点 cb=%#llx → %s+%#llx（%s）\n", (unsigned long long)cb,
+                            di.dli_sname, (unsigned long long)((uint64_t)(uintptr_t)cb - (uint64_t)(uintptr_t)di.dli_saddr),
+                            di.dli_fname ? di.dli_fname : "?");
+                else
+                    fprintf(stderr, "[dm] 首节点 cb=%#llx → dladdr 未命中\n", (unsigned long long)cb);
+            }
+        }
     }
     // 池分配器探针（楔死根因取证）：0x186bb0c 建完成表时调 0x18ce88c(池号,0x3000) 分配 512×0x18 项链表，
     // 返回 0 → 错误 0x34 → 完成注册表永远空。表基 = *(*(main+0x2b34710))，每池 0x68：[0x50]=堆对象
