@@ -436,6 +436,26 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
                 total++;
             }
             fprintf(stderr, " 共 %llu 节点\n", (unsigned long long)total);
+            // 最新节点（地址最小=池递减分配）：完整 0x48 字节 + 回调符号化——认出生产者载荷
+            {
+                uint64_t n2 = bhead, newest = 0;
+                for (int g2 = 0; n2 && ptr_readable((void *)(uintptr_t)n2) && g2 < 5000; g2++) {
+                    if (!newest || n2 < newest) newest = n2;
+                    n2 = rd64_checked((void *)(uintptr_t)n2);
+                }
+                if (newest && ptr_readable((void *)(uintptr_t)newest)) {
+                    fprintf(stderr, "[dm] 最新节点 %#llx：", (unsigned long long)newest);
+                    for (int o = 0; o < 0x48; o += 8) {
+                        uint64_t v = rd64_checked((void *)(uintptr_t)(newest + o));
+                        const char *mn = "?"; uint64_t off = 0;
+                        for (int j = 0; j < g_nmod; j++)
+                            if (v >= (uint64_t)(uintptr_t)g_mod[j].base && v < (uint64_t)(uintptr_t)g_mod[j].base + g_mod[j].size) { mn = g_mod[j].name; off = v - (uint64_t)(uintptr_t)g_mod[j].base; break; }
+                        if (v > 0x1000) fprintf(stderr, " +%#x:%#llx(%s+%#llx)", o, (unsigned long long)v, mn, (unsigned long long)off);
+                        else fprintf(stderr, " +%#x:%#llx", o, (unsigned long long)v);
+                    }
+                    fputc('\n', stderr);
+                }
+            }
             uint64_t rp = rd64_checked((void *)(uintptr_t)(gb + 0x2b34170));
             uint64_t reg = rp ? rd64_checked((void *)(uintptr_t)rp) : 0;
             if (reg && ptr_readable((void *)(uintptr_t)reg))
