@@ -1777,18 +1777,22 @@ void host_wake_pool_waits(void) {
     pthread_mutex_lock(&G);
     for (int i = 0; i < 64; i++) {
         if (!g_keyw[i].n || g_keyw[i].key < 0x400000000ull || g_keyw[i].key >= 0x500000000ull) continue;
-        // SDK 双检环对象：互斥@obj+0x1c，键@obj+0x20（键=互斥+4，实证）；状态字节 obj+0x10
+        // SDK 双检环对象（实证布局）：{u64@0x10 = 状态字节|u16结果|完成序号 hi32, u32@0x14 = 期望序号,
+        // mutex@0x1c, cv/key@0x20}。退出判据：状态字节非 0 或 完成序号 != 期望序号。
+        // 只置状态字节会「醒一次→调用方重置→再等」（CI 实证）；驱动侧完成必须递增完成序号。
         uint64_t obj = g_keyw[i].mut - 0x1c;
-        volatile uint8_t *st = (volatile uint8_t *)(uintptr_t)(obj + 0x10);
-        if (ptr_readable((void *)(uintptr_t)st)) {
-            *st = 1;   // 完成（结果 u16@obj+0x12 保持 0=成功）
+        volatile uint64_t *seq = (volatile uint64_t *)(uintptr_t)(obj + 0x10);
+        if (ptr_readable((void *)(uintptr_t)seq)) {
+            uint64_t v = *seq;
+            uint32_t hi = (uint32_t)(v >> 32);
+            *seq = (v & 0xffffffffull) | ((uint64_t)(hi + 1) << 32) | 1;   // 完成序号+1；状态字节=1
             *(volatile uint32_t *)(uintptr_t)g_keyw[i].key = 0;   // svc#29：清键
             woken++;
         }
     }
     if (woken) pthread_cond_broadcast(&GV);
     pthread_mutex_unlock(&G);
-    if (woken && n_woken++ < 8) LOG("驱动侧完成唤醒：%d 个池区等待键（mtl 完成）", woken);
+    if (woken && n_woken++ < 8) LOG("驱动侧完成唤醒：%d 个池区等待键（序号+1）", woken);
 }
 static uint32_t n_queue_geterror(void *q, void *info) { (void)q; if (info) memset(info, 0, 0x18); return 0; }
 // —— Metal 回放层（nvn_mtl.m）：真提交 + 完成回流（第一阶段骨架） ——
