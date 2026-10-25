@@ -422,7 +422,7 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
     // 注册表 = *(*(main+0x2b34170))：{arr@0 count@8 cap@0xc}——type==1 节点向它插条目。
     {
         static int b_probes;
-        if (b_probes++ < 6) {
+        if (b_probes++ < 6 || b_probes > 5) {   // 详查前 6 拍；此后仍跑（清头手术须持续生效）
             uint64_t gb = (uint64_t)(uintptr_t)g_mod[0].base;
             uint64_t hb = rd64_checked((void *)(uintptr_t)(gb + 0x2b341f8));
             uint64_t bhead = hb ? rd64_checked((void *)(uintptr_t)hb) : 0;
@@ -436,21 +436,14 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
                 total++;
             }
             fprintf(stderr, " 共 %llu 节点\n", (unsigned long long)total);
-            // —— B 链截断手术（死锁解楔）：动态节点全是早期订阅风暴的垃圾（CI 实证 6 拍冻结、
-            // 生产者已停、主线程 O(n²) 重走永不收尾→完成表 0x186bb0c 永不初始化）。
-            // 只清头不够——术前在飞走查沿本地指针继续爬（实测 >6 分钟）。逐节点 next=0：
-            // 在飞走查一步内终止；头同步清空。效果已沉淀于注册表，零损失。
-            if (b_probes == 3 && bhead) {
-                uint64_t n4 = bhead;
-                uint64_t cut = 0;
-                for (uint64_t g4 = 0; n4 && ptr_readable((void *)(uintptr_t)n4) && g4 < 200000; g4++) {
-                    uint64_t nx = rd64_checked((void *)(uintptr_t)n4);
-                    *(volatile uint64_t *)(uintptr_t)n4 = 0;   // next = NULL（在飞走查在此终止）
-                    cut++;
-                    n4 = nx;
-                }
+            // —— B 链清头手术（死锁解楔，CI 实证因果链）：装载 worker 风暴的等待事件由完成表
+            // （0x186bb0c，须走查返回后才初始化）发布，而订阅风暴让走查永不收尾——死环。
+            // 破环点=清链头：冻结链效果已沉淀，清空零损失；在飞轮本地走完。第 5 拍起每拍执行
+            // （早切会撞上洪水起点只切几节点——实证）。不毒化 next（SDK 也走此链，毒化即崩）。
+            if (b_probes >= 5 && bhead) {
                 *(volatile uint64_t *)(uintptr_t)hb = 0;   // *holder = NULL
-                fprintf(stderr, "[dm] B链清空手术：%llu 节点 next 置 0 + 头清空\n", (unsigned long long)cut);
+                fprintf(stderr, "[dm] B链清头手术（拍 %d）：头 %#llx（%llu 节点）→ 空\n",
+                        b_probes, (unsigned long long)bhead, (unsigned long long)total);
             }
             // 最新节点（地址最小=池递减分配）：完整 0x48 字节 + 回调符号化——认出生产者载荷
             {
