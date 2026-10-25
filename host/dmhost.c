@@ -438,22 +438,12 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
             fprintf(stderr, " 共 %llu 节点\n", (unsigned long long)total);
             // —— B 链截断手术（死锁解楔）：动态节点全是早期订阅风暴的垃圾（CI 实证 6 拍冻结、
             // 生产者已停、主线程 O(n²) 重走永不收尾→完成表 0x186bb0c 永不初始化）。
-            // 保留段=主模块静态节点（init_array 注册的核心处理器，kind 0x64/0x65/0x66/0x94…），
-            // 丢弃全部动态池节点。截头后下一轮走查即时完成。
-            if (b_probes == 3) {
-                uint64_t keep = 0, n3 = bhead, g3 = 0;
-                uint64_t mb = (uint64_t)(uintptr_t)g_mod[0].base, me = mb + g_mod[0].size;
-                while (n3 && g3++ < 200000) {
-                    if (n3 >= mb && n3 < me) { keep = n3; break; }   // 第一个静态节点=保留段头
-                    n3 = rd64_checked((void *)(uintptr_t)n3);
-                }
-                if (keep && keep != bhead) {
-                    *(volatile uint64_t *)(uintptr_t)hb = keep;   // *holder = 静态段头
-                    fprintf(stderr, "[dm] B链截断手术：头 %#llx → %#llx（丢动态垃圾，保留静态处理器段）\n",
-                            (unsigned long long)bhead, (unsigned long long)keep);
-                } else {
-                    fprintf(stderr, "[dm] B链截断手术：未找到静态段（keep=%#llx）\n", (unsigned long long)keep);
-                }
+            // 冻结链已被此前多轮走查全部处理过（注册效果已沉淀），直接清空零损失；
+            // 在飞走查沿本地指针走完本轮，下一轮即时完成 → 完成表初始化 → 事件恢复。
+            if (b_probes == 3 && bhead) {
+                *(volatile uint64_t *)(uintptr_t)hb = 0;   // *holder = NULL
+                fprintf(stderr, "[dm] B链清空手术：头 %#llx（%llu 节点）→ 空\n",
+                        (unsigned long long)bhead, (unsigned long long)total);
             }
             // 最新节点（地址最小=池递减分配）：完整 0x48 字节 + 回调符号化——认出生产者载荷
             {
