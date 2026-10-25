@@ -444,34 +444,44 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
                 *(volatile uint64_t *)(uintptr_t)hb = 0;   // *holder = NULL
                 fprintf(stderr, "[dm] B链清头手术（拍 %d）：头 %#llx（%llu 节点）→ 空\n",
                         b_probes, (unsigned long long)bhead, (unsigned long long)total);
-                // 注册表三 slot（0x2b34168/170/178 → {arr@0,count@8}）：t=1 键含唯一参数→
-                // 风暴插入永不去重→count 膨胀至百万→每节点扫描 O(百万)→在飞走查永不完成。
-                // count 清零=扫描即时返回（arr 悬空无害，count=0 不触达）。
-                for (int k = 0; k < 3; k++) {
-                    uint64_t rp2 = rd64_checked((void *)(uintptr_t)(gb + 0x2b34168 + 8 * k));
-                    if (rp2 && ptr_readable((void *)(uintptr_t)(rp2 + 8)))
-                        *(volatile uint64_t *)(uintptr_t)(rp2 + 8) = 0;
-                }
-                fprintf(stderr, "[dm] 注册表 count 清零手术（0x2b34168/170/178）\n");
-                // —— 终极：运行时补丁客体代码（在飞怪物走查的唯一杀法）。走查器 0x185d6c8 与
-                // 处理器 0x185d74c/0x185d980 入口改 movz w0,#1; ret——在飞轮逐节点开销归零，
-                // 10 万节点毫秒收尾；后续走查即时返回 1 → 0x186bb0c 完成表即刻初始化。
-                // 事件系统按调用点观察其消费方当前全部阻塞，无-op 化零损失（CI 实证回归基线）。
-                static const uint32_t k_stub[2] = {0x52800020u, 0xd65f03c0u};   // movz w0,#1; ret
-                static const uint32_t k_offs[3] = {0x185d6c8, 0x185d74c, 0x185d980};
-                int patched = 0;
-                for (int k = 0; k < 3; k++) {
-                    void *p = (void *)(uintptr_t)(gb + k_offs[k]);
-                    if (!ptr_readable(p)) continue;
-                    if (mprotect((void *)((uintptr_t)p & ~0xfffull), 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
-                        *(uint32_t *)p = k_stub[0];
-                        *(uint32_t *)((uint8_t *)p + 4) = k_stub[1];
+            }
+            // —— 终极：运行时补丁客体代码。入口桩（未来调用即时返回）+ 环回边 NOP（在飞
+            // 循环下一次迭代即跳出——入口桩对在飞无效，实证）。t1 扫描环 0x185d7c0、
+            // t2 扫描环 0x185da4c、t4 环 0x185da8c、走查节点环 0x185d738 NOP 后一次即出。
+            // 与链头无关（头清空后仍须补丁在飞轮），独立于 bhead 执行至完成。
+            if (b_probes >= 5) {
+                static const struct { uint32_t off; uint32_t w0, w1; int stub; } k_pats[] = {
+                    {0x185d6c8, 0x52800020u, 0xd65f03c0u, 1},   // 走查器入口 → movz w0,#1; ret
+                    {0x185d74c, 0x52800020u, 0xd65f03c0u, 1},   // t1 处理器入口
+                    {0x185d980, 0x52800020u, 0xd65f03c0u, 1},   // t2/t5 处理器入口
+                    {0x185d7c0, 0xd503201fu, 0, 0},             // t1 扫描环回边 → NOP
+                    {0x185da4c, 0xd503201fu, 0, 0},             // t2 扫描环回边 → NOP
+                    {0x185da8c, 0xd503201fu, 0, 0},             // t4 扫描环回边 → NOP
+                    {0x185d738, 0xd503201fu, 0, 0},             // 走查节点环回边 → NOP（一节点即返）
+                };
+                static int done_pats;
+                if (!done_pats) {
+                    int patched = 0;
+                    for (unsigned k = 0; k < sizeof k_pats / sizeof k_pats[0]; k++) {
+                        void *p = (void *)(uintptr_t)(gb + k_pats[k].off);
+                        if (!ptr_readable(p)) continue;
+                        if (mprotect((void *)((uintptr_t)p & ~0xfffull), 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+                            LOG("代码补丁 mprotect 失败 @%#x errno=%d", k_pats[k].off, errno);
+                            continue;
+                        }
+                        *(volatile uint32_t *)p = k_pats[k].w0;
+                        if (k_pats[k].stub) *(volatile uint32_t *)((uint8_t *)p + 4) = k_pats[k].w1;
                         __builtin___clear_cache((char *)p, (char *)p + 8);
                         mprotect((void *)((uintptr_t)p & ~0xfffull), 0x1000, PROT_READ | PROT_EXEC);
                         patched++;
                     }
+                    if (patched == (int)(sizeof k_pats / sizeof k_pats[0])) {
+                        done_pats = 1;
+                        fprintf(stderr, "[dm] 代码补丁完成：%d 处（3 入口桩 + 4 环回边 NOP）\n", patched);
+                    } else {
+                        fprintf(stderr, "[dm] 代码补丁部分：%d/%d 处（下拍重试）\n", patched, (int)(sizeof k_pats / sizeof k_pats[0]));
+                    }
                 }
-                if (patched) fprintf(stderr, "[dm] 走查器/处理器入口补丁：%d 处 → movz w0,#1; ret\n", patched);
             }
             // 最新节点（地址最小=池递减分配）：完整 0x48 字节 + 回调符号化——认出生产者载荷
             {
