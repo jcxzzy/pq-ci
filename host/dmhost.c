@@ -444,6 +444,15 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
                 *(volatile uint64_t *)(uintptr_t)hb = 0;   // *holder = NULL
                 fprintf(stderr, "[dm] B链清头手术（拍 %d）：头 %#llx（%llu 节点）→ 空\n",
                         b_probes, (unsigned long long)bhead, (unsigned long long)total);
+                // 注册表三 slot（0x2b34168/170/178 → {arr@0,count@8}）：t=1 键含唯一参数→
+                // 风暴插入永不去重→count 膨胀至百万→每节点扫描 O(百万)→在飞走查永不完成。
+                // count 清零=扫描即时返回（arr 悬空无害，count=0 不触达）。
+                for (int k = 0; k < 3; k++) {
+                    uint64_t rp2 = rd64_checked((void *)(uintptr_t)(gb + 0x2b34168 + 8 * k));
+                    if (rp2 && ptr_readable((void *)(uintptr_t)(rp2 + 8)))
+                        *(volatile uint64_t *)(uintptr_t)(rp2 + 8) = 0;
+                }
+                fprintf(stderr, "[dm] 注册表 count 清零手术（0x2b34168/170/178）\n");
             }
             // 最新节点（地址最小=池递减分配）：完整 0x48 字节 + 回调符号化——认出生产者载荷
             {
