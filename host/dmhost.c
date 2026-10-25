@@ -285,10 +285,18 @@ static uint32_t main_thread_register(void) {
 // 线程采样（SIGUSR1）：心跳时打断各存活线程打帧链——纯用户态自旋（无 svc）的落点只有这样才能看到
 static int ptr_readable(const void *);            // 定义在文件后部（日志汇区）
 static uint64_t rd64_checked(const void *);
-static void on_thread_sample(int sig) {
-    (void)sig;
+static void on_thread_sample(int sig, siginfo_t *si, void *uc_) {
+    (void)sig; (void)si;
     void guest_backtrace(uint64_t);
-    fprintf(stderr, "[dm]   ↷ 采样 h=%#x：", t_cur ? t_cur->handle : 0);
+    // 取被打断的 PC——纯用户态自旋的死循环指令直接可见
+    uint64_t pc = 0;
+    ucontext_t *uc = (ucontext_t *)uc_;
+    if (uc) pc = (uint64_t)uc->uc_mcontext->__ss.__pc;
+    const char *mn = "?"; uint64_t off = 0;
+    for (int j = 0; j < g_nmod; j++)
+        if (pc >= (uint64_t)(uintptr_t)g_mod[j].base && pc < (uint64_t)(uintptr_t)g_mod[j].base + g_mod[j].size) { mn = g_mod[j].name; off = pc - (uint64_t)(uintptr_t)g_mod[j].base; break; }
+    fprintf(stderr, "[dm]   ↷ 采样 h=%#x pc=%#llx(%s+%#llx)：", t_cur ? t_cur->handle : 0,
+            (unsigned long long)pc, mn, (unsigned long long)off);
     guest_backtrace((uint64_t)__builtin_frame_address(0));
 }
 void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体线程的落点
@@ -296,7 +304,8 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
     if (!sample_installed) {
         sample_installed = 1;
         struct sigaction ss = {0};
-        ss.sa_handler = on_thread_sample;
+        ss.sa_sigaction = on_thread_sample;
+        ss.sa_flags = SA_SIGINFO;
         sigaction(SIGUSR1, &ss, NULL);
     }
     pthread_mutex_lock(&G);
