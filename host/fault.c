@@ -100,8 +100,16 @@ static void fault_dump(int sig, siginfo_t *si, void *uc_) {
 }
 
 static int wd_beats;
-static void watchdog(int sig) {
-    (void)sig;
+uint64_t g_beat_pc;   // 心跳打断点 PC（SIGALRM 通常落在主线程——主线程真实自旋指令）
+static void watchdog(int sig, siginfo_t *si, void *uc_) {
+    (void)sig; (void)si;
+    if (uc_) {
+        ucontext_t *uc = uc_;
+        g_beat_pc = (uint64_t)uc->uc_mcontext->__ss.__pc;
+        char w[64];
+        where_of(g_beat_pc, w, sizeof w);
+        fprintf(stderr, "[dm] 心跳打断点 pc=%#llx(%s)\n", (unsigned long long)g_beat_pc, w);
+    }
     if (++wd_beats > 8) {   // 判定先行：转储可能因线程数暴涨而耗时，绝不能拖过时限
         fprintf(stderr, "[dm] 看门狗最终到期（第 %d 拍）\n", wd_beats);
         _exit(71);
@@ -143,7 +151,8 @@ void diag_install(void) {
     sigaction(SIGILL, &sa, NULL);
     sigaction(SIGFPE, &sa, NULL);
     struct sigaction sw = {0};
-    sw.sa_handler = watchdog;
+    sw.sa_sigaction = watchdog;
+    sw.sa_flags = SA_SIGINFO;
     sigaction(SIGALRM, &sw, NULL);
     {   // 60 秒重复心跳：每分钟转储线程落点，10 分钟终止（替代一次性 alarm）
         struct itimerval it = {60, 0, 60, 0};
