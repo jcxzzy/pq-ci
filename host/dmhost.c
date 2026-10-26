@@ -2674,7 +2674,7 @@ static void *h_nvn_bootstrap(const char *name) {
 static uint32_t h_oe_handheld(void) { return 1; }   // GetOperationMode：1=Handheld（触屏取向）
 static uint64_t h_oe_normal(void) { return 0; }     // GetPerformanceMode：0=Normal
 static uint32_t h_oe_focused(void) { return 1; }    // GetCurrentFocusState：1=InFocus
-static uint32_t h_oe_lang(uint8_t *out) { if (out) *out = 1; return 0; }   // GetDesiredLanguage：1=English（语言码表后续接宿主）
+static uint32_t h_oe_lang(void) { return 1; }   // GetDesiredLanguage：无参、Language 枚举经 w0 返回（CI 实证旧签名误写残留 x0——指进代码页即 SIGBUS）。1=English
 static uint32_t h_oe_trypop(uint32_t *out) {
     if (out) *out = 0;   // 无消息：id=0 不命中 0x10/0x1f/0x1e 任何处理器（此前不写出参，残留栈值可能被当 ExitRequested）
     return 0;
