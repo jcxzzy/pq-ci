@@ -3121,7 +3121,8 @@ static int fake_opus_vt_ret0(void) { return 0; }
 static int fake_opus_vt5(void *self, int *out, uint64_t packed) { (void)self; (void)packed; if (out) *out = 0; return 0; }
 static uint64_t g_fake_opus_vt[24];
 static uint64_t g_fake_opus_obj;   // [0] = vtable 指针
-static void fake_opus_create(void *sret) { *(uint64_t *)sret = (uint64_t)(uintptr_t)&g_fake_opus_obj; }
+void fake_opus_create_c(void *sret) { *(uint64_t *)sret = (uint64_t)(uintptr_t)&g_fake_opus_obj; }   // 经 entry.S _fake_sret_shim（sret 在 x8）
+extern void fake_sret_shim(void);
 static void wwise_parser_fixup(void) {
     module_t *m = NULL;
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "sdk")) m = &g_mod[i];
@@ -3149,10 +3150,10 @@ static void wwise_parser_fixup(void) {
     if (ptr_readable(got)) {
         void *pg = (void *)((uintptr_t)got & ~0xfffull);
         if (mprotect(pg, 0x1000, PROT_READ | PROT_WRITE) == 0) {
-            *got = (uint64_t)(uintptr_t)fake_opus_create;
+            *got = (uint64_t)(uintptr_t)&fake_sret_shim;
             mprotect(pg, 0x1000, PROT_READ | PROT_EXEC);
-        } else *got = (uint64_t)(uintptr_t)fake_opus_create;
-        LOG("Opus 管理器伪造：GOT sdk+0x911d10 → %p", (void *)fake_opus_create);
+        } else *got = (uint64_t)(uintptr_t)&fake_sret_shim;
+        LOG("Opus 管理器伪造：GOT sdk+0x911d10 → %p（sret 跳板）", (void *)&fake_sret_shim);
     }
 }
 
