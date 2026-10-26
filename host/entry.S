@@ -128,3 +128,11 @@ _dm_thread_enter:
     br x16
 1:  bl _dm_thread_returned
     brk #0
+
+// sret 跳板：AAPCS64 结构体返回指针在 x8，C 伪函数按 x0 取参——
+// 此跳板把 x8 挪到 x0 再尾跳 C 实现（CreateHardwareOpusDecoderManagerByHipc 伪造用）。
+    .globl _fake_sret_shim
+    .p2align 2
+_fake_sret_shim:
+    mov x0, x8
+    b _fake_opus_create_c
