@@ -3017,27 +3017,48 @@ static int wwise_str2int(void *self, int *out, uint64_t packed, uint64_t x3) {
     if (out) *out = v;
     return 0;
 }
+// —— 硬件 Opus 解码管理器伪造（Wwise init 崩溃链第二环）——
+// Wwise 初始化经 sdk+0x10c208 getter：PLT→CreateHardwareOpusDecoderManagerByHipc()（HIPC IPC）
+// → 管理器对象 vt[5](obj,int* out,u64 packed) 能力查询 → 失败/错误 → AbortImpl（svc#38）。
+// 宿主把 GOT 槽 sdk+0x911d10 重定向到伪造 create：返回伪对象，vt[5] 回成功+能力 0
+// → Wwise 退回软件 Opus 解码（真机合法回退路径），vt[1] 等其余槽返回 0。
+static int fake_opus_vt_ret0(void) { return 0; }
+static int fake_opus_vt5(void *self, int *out, uint64_t packed) { (void)self; (void)packed; if (out) *out = 0; return 0; }
+static uint64_t g_fake_opus_vt[24];
+static uint64_t g_fake_opus_obj;   // [0] = vtable 指针
+static void fake_opus_create(void *sret) { *(uint64_t *)sret = (uint64_t)(uintptr_t)&g_fake_opus_obj; }
 static void wwise_parser_fixup(void) {
     module_t *m = NULL;
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "sdk")) m = &g_mod[i];
     if (!m) return;
+    // 1) 解析器链伪造（sdk+0x92d628）
     uint64_t *slot = (uint64_t *)((uint8_t *)m->base + 0x92d628);
-    if (!ptr_readable(slot) || *slot) return;   // 已注册（真机语义）则不动
-    static uint64_t cell, obj, vt[24];
-    for (int i = 0; i < 24; i++) vt[i] = (uint64_t)(uintptr_t)wwise_vt_ret0;
-    vt[5] = (uint64_t)(uintptr_t)wwise_str2int;   // vt+0x28
-    obj = (uint64_t)(uintptr_t)vt;
-    cell = (uint64_t)(uintptr_t)&obj;
-    void *pg = (void *)((uintptr_t)slot & ~0xfffull);
-    int was_rx = 1;
-    if (mprotect(pg, 0x1000, PROT_READ | PROT_WRITE) == 0) {
-        *slot = (uint64_t)(uintptr_t)&cell;
-        mprotect(pg, 0x1000, PROT_READ | PROT_EXEC);
-    } else {
-        was_rx = 0;
-        *slot = (uint64_t)(uintptr_t)&cell;
+    if (ptr_readable(slot) && !*slot) {
+        static uint64_t cell, obj, vt[24];
+        for (int i = 0; i < 24; i++) vt[i] = (uint64_t)(uintptr_t)wwise_vt_ret0;
+        vt[5] = (uint64_t)(uintptr_t)wwise_str2int;   // vt+0x28
+        obj = (uint64_t)(uintptr_t)vt;
+        cell = (uint64_t)(uintptr_t)&obj;
+        void *pg = (void *)((uintptr_t)slot & ~0xfffull);
+        if (mprotect(pg, 0x1000, PROT_READ | PROT_WRITE) == 0) {
+            *slot = (uint64_t)(uintptr_t)&cell;
+            mprotect(pg, 0x1000, PROT_READ | PROT_EXEC);
+        } else *slot = (uint64_t)(uintptr_t)&cell;
+        LOG("Wwise 解析器伪造：*(sdk+0x92d628)=%#llx", (unsigned long long)*slot);
     }
-    LOG("Wwise 解析器伪造：*(sdk+0x92d628)=%#llx（rx=%d）", (unsigned long long)*slot, was_rx);
+    // 2) Opus 管理器 GOT 重定向（sdk+0x911d10，装载器重定位之后覆盖）
+    for (int i = 0; i < 24; i++) g_fake_opus_vt[i] = (uint64_t)(uintptr_t)fake_opus_vt_ret0;
+    g_fake_opus_vt[5] = (uint64_t)(uintptr_t)fake_opus_vt5;
+    g_fake_opus_obj = (uint64_t)(uintptr_t)g_fake_opus_vt;
+    uint64_t *got = (uint64_t *)((uint8_t *)m->base + 0x911d10);
+    if (ptr_readable(got)) {
+        void *pg = (void *)((uintptr_t)got & ~0xfffull);
+        if (mprotect(pg, 0x1000, PROT_READ | PROT_WRITE) == 0) {
+            *got = (uint64_t)(uintptr_t)fake_opus_create;
+            mprotect(pg, 0x1000, PROT_READ | PROT_EXEC);
+        } else *got = (uint64_t)(uintptr_t)fake_opus_create;
+        LOG("Opus 管理器伪造：GOT sdk+0x911d10 → %p", (void *)fake_opus_create);
+    }
 }
 
 static void load_modules(const char *dir, const char **names, int n) {    for (int i = 0; i < n; i++) { strlcpy(g_mod[i].name, names[i], sizeof g_mod[i].name); read_layout(&g_mod[i], dir); }
