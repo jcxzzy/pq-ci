@@ -3014,23 +3014,30 @@ static void load_modules(const char *dir, const char **names, int n) {
         close(fd);
         install_key_page(m);
         obs_patch(m);   // text 封 RX 前打观测门（main 的 il2cpp os::File 分支边）
-        if (!i) {   // 解楔补丁（RW 窗口期，mprotect 前）：NOP 订阅注册表三个扫描环回边
-            // —— CI 实证因果链：装载 worker 风暴订阅（键含唯一参数永不去重）→注册表膨胀至
-            // 百万→每节点扫描 O(百万)→走查永不收尾→完成表 0x186bb0c 永不初始化→worker 的
-            // 完成事件永不发布→风暴加剧。NOP 回边=扫描一次即出（O(1)），走查 O(n) 完成，
-            // 事件系统保留功能（首条匹配语义），死锁从根断。macOS 拒运行时 RWX（EINVAL），
-            // 只能装载期改。
-            static const uint32_t nop = 0xd503201fu;
-            static const uint32_t loop_nops[] = {0x185d7c0, 0x185da4c, 0x185da8c};
+        if (!i) {   // 解楔补丁（RW 窗口期，mprotect 前）
+            // —— CI 实证因果链：装载 worker 风暴订阅（键含唯一参数永不去重）→走查器边走边
+            // 向注册表插入→注册表膨胀至百万→每节点 O(百万) 扫描→走查永不收尾→完成表
+            // 0x186bb0c 永不初始化→装载完成事件永不发布→风暴加剧。
+            // 根治：装载期把走查器入口 0x185d6c8 桩化为 movz w0,#1; ret（运行时打无效——
+            // 在飞走查已存在；装载期打则无任何在飞调用，且唯一调用方 0x1866fd4 只判返回值）。
+            // 走查即时返回 1 → 0x186660c→0x186bb0c 完成表即刻初始化 → 0x18aad48 事件发布。
+            // 本 CI 基线里全部走查节点均为 no-op（注册表 miss），桩化零损失。
+            static const struct { uint32_t off; uint32_t w0, w1; int two; } pats[] = {
+                {0x185d6c8, 0x52800020u, 0xd65f03c0u, 1},   // 走查器入口 → movz w0,#1; ret
+                {0x185d7c0, 0xd503201fu, 0, 0},             // t1 扫描环回边 → NOP（保险）
+                {0x185da4c, 0xd503201fu, 0, 0},             // t2 扫描环回边 → NOP（保险）
+                {0x185da8c, 0xd503201fu, 0, 0},             // t4 扫描环回边 → NOP（保险）
+            };
             int np = 0;
-            for (unsigned k = 0; k < sizeof loop_nops / sizeof loop_nops[0]; k++)
-                if (loop_nops[k] + 4 <= m->text_end) {
-                    void *p = (uint8_t *)m->base + loop_nops[k];
-                    *(uint32_t *)p = nop;
-                    __builtin___clear_cache((char *)p - 64, (char *)p + 64);   // arm64 I-cache 不连贯——不清则 CPU 执行旧指令
-                    np++;
-                }
-            LOG("解楔补丁：注册表扫描环回边 NOP ×%d（0x185d7c0/0x185da4c/0x185da8c）", np);
+            for (unsigned k = 0; k < sizeof pats / sizeof pats[0]; k++) {
+                if (pats[k].off + 8 > m->text_end) continue;
+                uint8_t *p = (uint8_t *)m->base + pats[k].off;
+                *(uint32_t *)p = pats[k].w0;
+                if (pats[k].two) *(uint32_t *)(p + 4) = pats[k].w1;
+                __builtin___clear_cache((char *)p - 64, (char *)p + 64);   // arm64 I-cache 不连贯
+                np++;
+            }
+            LOG("解楔补丁 ×%d：走查器入口桩 + 3 扫描环 NOP", np);
         }
         uint64_t rx = (m->text_end + PAGE - 1) & ~(uint64_t)(PAGE - 1);
         if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
