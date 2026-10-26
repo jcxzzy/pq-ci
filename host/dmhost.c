@@ -2998,8 +2998,49 @@ static void relocate(module_t *m) {
     LOG("%s: reloc rel=%d abs=%d jmp=%d", m->name, cnt[0], cnt[1], cnt[2]);
 }
 
-static void load_modules(const char *dir, const char **names, int n) {
-    for (int i = 0; i < n; i++) { strlcpy(g_mod[i].name, names[i], sizeof g_mod[i].name); read_layout(&g_mod[i], dir); }
+// —— Wwise 设置解析器伪造（装载死锁破解后 CI 实证的新崩溃面）——
+// 游戏推进到 "WwiseUnity: Initialize sound engine" 后崩于 sdk+0x99610：parse8(out,str,len)
+// 三层链 *(sdk+0x92d628)=P → *P=obj → obj[0]=vt → 虚方法 vt[5](obj,int* out,u64 packed)
+// 把打包字符串转整数（Wwise 设置串如 "48000"/"6"）。P 为 NULL=注册链从未建立（其注册
+// 依赖宿主环境不可用的路径）。宿主伪造整链：P→cell{obj}→obj{vt}→vt[5]=十进制解析、
+// 其余槽=返回 0。数据页 mprotect RW（无 X 合法）写回。
+static int wwise_vt_ret0(void) { return 0; }
+static int wwise_str2int(void *self, int *out, uint64_t packed, uint64_t x3) {
+    (void)self; (void)x3;
+    char s[9]; int n = 0, v = 0;
+    for (int i = 0; i < 8; i++) {
+        char c = (char)(uint8_t)(packed >> (8 * i));
+        if (c >= '0' && c <= '9') s[n++] = c; else break;
+    }
+    s[n] = 0;
+    for (int i = 0; i < n; i++) v = v * 10 + (s[i] - '0');
+    if (out) *out = v;
+    return 0;
+}
+static void wwise_parser_fixup(void) {
+    module_t *m = NULL;
+    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "sdk")) m = &g_mod[i];
+    if (!m) return;
+    uint64_t *slot = (uint64_t *)((uint8_t *)m->base + 0x92d628);
+    if (!ptr_readable(slot) || *slot) return;   // 已注册（真机语义）则不动
+    static uint64_t cell, obj, vt[24];
+    for (int i = 0; i < 24; i++) vt[i] = (uint64_t)(uintptr_t)wwise_vt_ret0;
+    vt[5] = (uint64_t)(uintptr_t)wwise_str2int;   // vt+0x28
+    obj = (uint64_t)(uintptr_t)vt;
+    cell = (uint64_t)(uintptr_t)&obj;
+    void *pg = (void *)((uintptr_t)slot & ~0xfffull);
+    int was_rx = 1;
+    if (mprotect(pg, 0x1000, PROT_READ | PROT_WRITE) == 0) {
+        *slot = (uint64_t)(uintptr_t)&cell;
+        mprotect(pg, 0x1000, PROT_READ | PROT_EXEC);
+    } else {
+        was_rx = 0;
+        *slot = (uint64_t)(uintptr_t)&cell;
+    }
+    LOG("Wwise 解析器伪造：*(sdk+0x92d628)=%#llx（rx=%d）", (unsigned long long)*slot, was_rx);
+}
+
+static void load_modules(const char *dir, const char **names, int n) {    for (int i = 0; i < n; i++) { strlcpy(g_mod[i].name, names[i], sizeof g_mod[i].name); read_layout(&g_mod[i], dir); }
     create_keys();
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
@@ -3145,6 +3186,7 @@ int main(int argc, char **argv) {
     for (int i = 2; i < argc && n < MAX_MOD; i++) names[n++] = argv[i];
     if (!n) { names[n++] = "main"; names[n++] = "sdk"; names[n++] = "subsdk0"; }
     load_modules(argv[1], names, n);
+    wwise_parser_fixup();
     guest_main();
     return 0;
 }
