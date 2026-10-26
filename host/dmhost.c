@@ -2698,9 +2698,104 @@ static int pass_allow(uint64_t n) {
     g_passthru += n;
     return g_passthru < 4ull * 1024 * 1024;
 }
-static uint64_t h_g_printf(const char *fmt, ...) { va_list ap; va_start(ap, fmt); int r = pass_allow(64) ? vfprintf(stderr, fmt, ap) : 64; va_end(ap); return r; }
-static uint64_t h_g_fprintf(void *f, const char *fmt, ...) { (void)f; va_list ap; va_start(ap, fmt); int r = pass_allow(64) ? vfprintf(stderr, fmt, ap) : 64; va_end(ap); return r; }
-static uint64_t h_g_vfprintf(void *f, const char *fmt, va_list ap) { (void)f; return pass_allow(64) ? (uint64_t)vfprintf(stderr, fmt, ap) : 64; }
+// —— 安全格式化器：部分初始化下游戏日志会带坏 %s 指针（CI 实证 0xffffff80ffffffd8 两负
+// int 被当字符串传 strlen 即崩）。逐转换解析；%s 先 ptr_readable 验证，坏指针替换
+// "(badptr)"。全部转换手写（宽度/精度/标志自实现），不把动态串当格式传给 *printf 家族。
+static void out_pad(FILE *f, int n, char c) { for (int i = 0; i < n; i++) fputc(c, f); }
+static void out_num(FILE *f, unsigned long long v, int base, int upper, int neg, int width, int prec, int fl) {
+    char dig[72];   // 2^64 二进制最长 64 位 + 符号余量
+    int n = 0;
+    const char *hx = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+    do { dig[n++] = hx[v % (unsigned)base]; v /= (unsigned)base; } while (v);
+    int zeros = (prec > n ? prec - n : 0);
+    int len = n + zeros + (neg || (fl & 3) ? 1 : 0);
+    int pad = (width > len ? width - len : 0);
+    if (!(fl & 4) && !(fl & 8)) out_pad(f, pad, ' ');
+    if (neg) fputc('-', f);
+    else if (fl & 1) fputc('+', f);
+    else if (fl & 2) fputc(' ', f);
+    if (!(fl & 4) && (fl & 8)) out_pad(f, pad, '0');
+    out_pad(f, zeros, '0');
+    while (n > 0) fputc(dig[--n], f);
+    if (fl & 4) out_pad(f, pad, ' ');
+}
+static void out_str(FILE *f, const char *s, int width, int prec, int left) {
+    int n = 0;
+    while (s[n] && (prec < 0 || n < prec)) n++;
+    int pad = (width > n ? width - n : 0);
+    if (!left) out_pad(f, pad, ' ');
+    fwrite(s, 1, (size_t)n, f);
+    if (left) out_pad(f, pad, ' ');
+}
+static void safe_vfprintf(FILE *f, const char *fmt, va_list ap) {
+    if (!ptr_readable(fmt)) { fputs("(badfmt)", f); return; }
+    const char *p = fmt;
+    while (*p) {
+        if (*p != '%') { const char *q = p; while (*q && *q != '%') q++; fwrite(p, 1, (size_t)(q - p), f); p = q; continue; }
+        p++;
+        int fl = 0;   // bit0 '+' bit1 ' ' bit2 '-' bit3 '0'
+        while (*p == '-' || *p == '+' || *p == ' ' || *p == '#' || *p == '0') {
+            if (*p == '-') fl |= 4; else if (*p == '+') fl |= 1; else if (*p == ' ') fl |= 2; else if (*p == '0') fl |= 8;
+            p++;
+        }
+        int width = 0;
+        if (*p == '*') { width = va_arg(ap, int); p++; } else while (*p >= '0' && *p <= '9') width = width * 10 + (*p++ - '0');
+        int prec = -1;
+        if (*p == '.') { p++; prec = 0; if (*p == '*') { prec = va_arg(ap, int); p++; } else while (*p >= '0' && *p <= '9') prec = prec * 10 + (*p++ - '0'); }
+        int l2 = 0, ls = 0, zs = 0;
+        while (*p == 'l' || *p == 'h' || *p == 'z' || *p == 'j' || *p == 't' || *p == 'q' || *p == 'L') {
+            if (*p == 'l') l2++;
+            else if (*p == 'z') zs = 1;
+            else if (*p == 'j' || *p == 't' || *p == 'q') ls = 1;
+            p++;
+        }
+        char conv = *p;
+        if (!conv) break;
+        switch (conv) {
+        case '%': fputc('%', f); break;
+        case 's': {
+            const char *sv = va_arg(ap, const char *);
+            if (!sv) sv = "(null)";
+            else if (!ptr_readable(sv)) sv = "(badptr)";
+            out_str(f, sv, width, prec, fl & 4);
+            break;
+        }
+        case 'c': {
+            int c = va_arg(ap, int);
+            int pad = (width > 1 ? width - 1 : 0);
+            if (!(fl & 4)) out_pad(f, pad, ' ');
+            fputc(c, f);
+            if (fl & 4) out_pad(f, pad, ' ');
+            break;
+        }
+        case 'd': case 'i': {
+            long long v = (l2 >= 2 || ls || zs) ? va_arg(ap, long long) : (l2 ? va_arg(ap, long) : va_arg(ap, int));
+            unsigned long long m = (v < 0) ? (unsigned long long)(-(v + 1)) + 1 : (unsigned long long)v;
+            out_num(f, m, 10, 0, v < 0, width, prec, fl);
+            break;
+        }
+        case 'u': case 'x': case 'X': case 'o': {
+            unsigned long long v = (l2 >= 2 || ls || zs) ? va_arg(ap, unsigned long long) : (l2 ? va_arg(ap, unsigned long) : (unsigned long long)va_arg(ap, unsigned int));
+            out_num(f, v, conv == 'o' ? 8 : (conv == 'u' ? 10 : 16), conv == 'X', 0, width, prec, fl);
+            break;
+        }
+        case 'p': out_num(f, (unsigned long long)(uintptr_t)va_arg(ap, void *), 16, 0, 0, width, prec, fl); break;
+        case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': {
+            char b[64];
+            if (conv == 'f' || conv == 'F') snprintf(b, sizeof b, "%f", va_arg(ap, double));
+            else if (conv == 'e' || conv == 'E') snprintf(b, sizeof b, "%e", va_arg(ap, double));
+            else snprintf(b, sizeof b, "%g", va_arg(ap, double));
+            out_str(f, b, width, -1, fl & 4);
+            break;
+        }
+        default: fputc('%', f); fputc(conv, f); break;
+        }
+        p++;
+    }
+}
+static uint64_t h_g_printf(const char *fmt, ...) { va_list ap; va_start(ap, fmt); if (pass_allow(64)) safe_vfprintf(stderr, fmt, ap); va_end(ap); return 64; }
+static uint64_t h_g_fprintf(void *f, const char *fmt, ...) { (void)f; va_list ap; va_start(ap, fmt); if (pass_allow(64)) safe_vfprintf(stderr, fmt, ap); va_end(ap); return 64; }
+static uint64_t h_g_vfprintf(void *f, const char *fmt, va_list ap) { (void)f; if (pass_allow(64)) safe_vfprintf(stderr, fmt, ap); return 64; }
 static uint64_t h_g_fwrite(const void *p, uint64_t sz, uint64_t n, void *f) { (void)f; return pass_allow(sz * n) ? (uint64_t)fwrite(p, (size_t)sz, (size_t)n, stderr) : n; }
 static uint64_t h_g_puts(const char *s) { if (pass_allow(s ? strlen(s) : 6)) { fputs(s ? s : "(null)", stderr); fputc('\n', stderr); } return 0; }
 static uint64_t h_g_fflush(void *f) { (void)f; fflush(stderr); return 0; }
