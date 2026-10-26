@@ -839,7 +839,7 @@ static uint64_t svc_impl(int num, uint64_t *x) {
         pthread_mutex_lock(&G); x[1] = h_alloc(H_FAKE, NULL); pthread_mutex_unlock(&G);
         return 0;
     }
-    case 33: LOG("svc#33 SendSyncRequest h=%#llx（IPC 未接管）", (unsigned long long)x[0]); return 0xF601;
+    case 33: LOG("svc#33 SendSyncRequest h=%#llx（IPC 未接管）", (unsigned long long)x[0]); return 0xE15;   // 合法 HOS Result（服务未找到）——非法格式（如 0xF601）会触发 sf 层断言（CI 实证）
     case 36: x[1] = 0x50; return 0;                   // GetProcessId(out u64, h) → x1
     case 37: {  // GetThreadId(out u64, h) → x1
         uint32_t i = (uint32_t)x[1] - 0x100;
