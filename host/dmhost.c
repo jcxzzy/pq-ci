@@ -1286,6 +1286,7 @@ static int host_path(const char *guest, char *out, size_t n) {
     return -1;
 }
 #define FS_ENOENT 0x202   // nn::fs PathNotFound（模块 2）
+static uint8_t g_fh_bnk[64];   // .bnk 句柄标记：Wwise 银行 IO 专查（不受日志封顶影响）
 
 static uint32_t h_openfile(uint64_t *out, const char *path, int mode) {
     char hp[1100];
@@ -1305,7 +1306,6 @@ static uint32_t h_openfile(uint64_t *out, const char *path, int mode) {
 }
 static uint32_t g_rdlog_n;
 static uint32_t g_szlog_n;
-static uint8_t g_fh_bnk[64];   // .bnk 句柄标记：Wwise 银行 IO 专查（不受日志封顶影响）
 static uint32_t h_readfile_n(uint64_t *out, uint64_t h, int64_t off, void *buf, uint64_t n) {
     if (!h || h >= MAX_FH || !g_fh[h]) { LOG("ReadFile 无效句柄 h=%llu off=%lld n=%llu", (unsigned long long)h, (long long)off, (unsigned long long)n); return 0xF601; }
     uint64_t pos;
