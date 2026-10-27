@@ -436,14 +436,14 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
                 total++;
             }
             fprintf(stderr, " 共 %llu 节点\n", (unsigned long long)total);
-            // —— B 链清头手术（死锁解楔，CI 实证因果链）：装载 worker 风暴的等待事件由完成表
-            // （0x186bb0c，须走查返回后才初始化）发布，而订阅风暴让走查永不收尾——死环。
-            // 破环点=清链头：冻结链效果已沉淀，清空零损失；在飞轮本地走完。第 5 拍起每拍执行
-            // （早切会撞上洪水起点只切几节点——实证）。不毒化 next（SDK 也走此链，毒化即崩）。
-            if (b_probes >= 5 && bhead) {
+            // —— B 链清头手术已退役为保险丝：v2 走查器真实消费后链应自愈，无条件清头会丢
+            // 正常事件（CI 实证因果链见 STATE.md：风暴等待事件由完成表发布、订阅风暴让走查
+            // 永不收尾——该死环已被装载期注册表封顶根治）。仅当链长仍爆（guard 封顶 5000）
+            // 时兜底切头，防 v2 失效回归楔死。不毒化 next（SDK 也走此链，毒化即崩）。
+            if (guard >= 5000 && bhead) {
                 *(volatile uint64_t *)(uintptr_t)hb = 0;   // *holder = NULL
-                fprintf(stderr, "[dm] B链清头手术（拍 %d）：头 %#llx（%llu 节点）→ 空\n",
-                        b_probes, (unsigned long long)bhead, (unsigned long long)total);
+                fprintf(stderr, "[dm] B链保险丝（拍 %d，链爆长）：头 %#llx → 空\n",
+                        b_probes, (unsigned long long)bhead);
             }
             // （运行时代码补丁已废——macOS 拒运行时 RWX（mprotect EINVAL，CI 实证）；
             // 解楔改为装载期 RW 窗口 NOP 扫描环回边，见 load_modules。）
@@ -467,16 +467,22 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
                     fputc('\n', stderr);
                 }
             }
-            uint64_t rp = rd64_checked((void *)(uintptr_t)(gb + 0x2b34170));
-            uint64_t reg = rp ? rd64_checked((void *)(uintptr_t)rp) : 0;
-            if (reg && ptr_readable((void *)(uintptr_t)reg))
-                fprintf(stderr, "[dm] 注册表 arr=%#llx count=%llu cap=%llu\n",
-                        (unsigned long long)rd64_checked((void *)(uintptr_t)reg),
-                        (unsigned long long)(rd64_checked((void *)(uintptr_t)(reg + 8)) & 0xffffffff),
-                        (unsigned long long)(rd64_checked((void *)(uintptr_t)(reg + 0xc)) & 0xffffffff));
-            else
-                fprintf(stderr, "[dm] 注册表 未建立（*0x2b34170=%#llx → %#llx）\n",
-                        (unsigned long long)rp, (unsigned long long)reg);
+            // 三注册表 v2 封顶行为观测：t1 订阅 24B、t2a 24B、t2b 池 16B（cap 应恒 ≤0x1000）
+            static const struct { uint64_t g; const char *nm; } k_regs[] = {
+                {0x2b34170, "t1订阅"}, {0x2b34168, "t2a"}, {0x2b34178, "t2b池"},
+            };
+            for (unsigned r = 0; r < 3; r++) {
+                uint64_t rp = rd64_checked((void *)(uintptr_t)(gb + k_regs[r].g));
+                uint64_t reg = rp ? rd64_checked((void *)(uintptr_t)rp) : 0;
+                if (reg && ptr_readable((void *)(uintptr_t)reg))
+                    fprintf(stderr, "[dm] 注册表[%s] arr=%#llx count=%llu cap=%llu\n", k_regs[r].nm,
+                            (unsigned long long)rd64_checked((void *)(uintptr_t)reg),
+                            (unsigned long long)(rd64_checked((void *)(uintptr_t)(reg + 8)) & 0xffffffff),
+                            (unsigned long long)(rd64_checked((void *)(uintptr_t)(reg + 0xc)) & 0xffffffff));
+                else
+                    fprintf(stderr, "[dm] 注册表[%s] 未建立（*%#llx=%#llx → %#llx）\n", k_regs[r].nm,
+                            (unsigned long long)k_regs[r].g, (unsigned long long)rp, (unsigned long long)reg);
+            }
         }
     }
     // 返回 0 → 错误 0x34 → 完成注册表永远空。表基 = *(*(main+0x2b34710))，每池 0x68：[0x50]=堆对象
@@ -3180,30 +3186,35 @@ static void load_modules(const char *dir, const char **names, int n) {    for (i
         close(fd);
         install_key_page(m);
         obs_patch(m);   // text 封 RX 前打观测门（main 的 il2cpp os::File 分支边）
-        if (!i) {   // 解楔补丁（RW 窗口期，mprotect 前）
-            // —— CI 实证因果链：装载 worker 风暴订阅（键含唯一参数永不去重）→走查器边走边
-            // 向注册表插入→注册表膨胀至百万→每节点 O(百万) 扫描→走查永不收尾→完成表
-            // 0x186bb0c 永不初始化→装载完成事件永不发布→风暴加剧。
-            // 根治：装载期把走查器入口 0x185d6c8 桩化为 movz w0,#1; ret（运行时打无效——
-            // 在飞走查已存在；装载期打则无任何在飞调用，且唯一调用方 0x1866fd4 只判返回值）。
-            // 走查即时返回 1 → 0x186660c→0x186bb0c 完成表即刻初始化 → 0x18aad48 事件发布。
-            // 本 CI 基线里全部走查节点均为 no-op（注册表 miss），桩化零损失。
-            static const struct { uint32_t off; uint32_t w0, w1; int two; } pats[] = {
-                {0x185d6c8, 0x52800020u, 0xd65f03c0u, 1},   // 走查器入口 → movz w0,#1; ret
-                {0x185d7c0, 0xd503201fu, 0, 0},             // t1 扫描环回边 → NOP（保险）
-                {0x185da4c, 0xd503201fu, 0, 0},             // t2 扫描环回边 → NOP（保险）
-                {0x185da8c, 0xd503201fu, 0, 0},             // t4 扫描环回边 → NOP（保险）
+        if (!i) {   // 解楔补丁 v2（RW 窗口期，mprotect 前）
+            // —— v1（走查器全桩）已退役：桩化让走查器/t1/t2 全不执行，链上半建成节点诱发
+            // 0xef2e64（事件队列消费者哨兵链 next=NULL 崩）。v2 = 恢复真实语义 + 注册表封顶：
+            // 三注册表（t1 订阅 24B @*0x2b34170、t2a 24B @*0x2b34168、t2b 池 16B @*0x2b34178）
+            // 同构 {array@0,count@8,cap@0xc}，懒初始化全 0，miss 即插且扩容 cap 只 +1 →
+            // 风暴键（含唯一参数永不去重）百万插入 × O(n) 扫描 = O(n²) 楔死。
+            // 封顶双补丁（每表 3 处）：判定点 cmp count,#0xfff + b.hs 失败路径（表满零成本
+            // 拒插，不再进扩容块）；扩容块 add cap,#1 → movz cap,#0x1000（首扩直升 4096，
+            // 之后 cap 恒定，追加检查 cmp count,cap 兜底）。走查器/扫描环保持原始代码。
+            static const struct { uint32_t off; uint32_t w0; } pats[] = {
+                {0x185d820, 0x713fff1fu},   // t1 判定：cmp w24(count), #0xfff
+                {0x185d824, 0x540009a2u},   // t1 满表：b.hs 0x185d958（拒插返 2，零 realloc）
+                {0x185d830, 0x52820019u},   // t1 扩容：movz w25(cap), #0x1000
+                {0x185db20, 0x713ffeffu},   // t2a 判定：cmp w23(count), #0xfff
+                {0x185db24, 0x540012a2u},   // t2a 满表：b.hs 0x185dd78（拒插返 0x34）
+                {0x185db34, 0x52820018u},   // t2a 扩容：movz w24(cap), #0x1000
+                {0x185dc40, 0x713fff1fu},   // t2b 判定：cmp w24(count), #0xfff
+                {0x185dc44, 0x540009e2u},   // t2b 满表：b.hs 0x185dd80（拒插返 0x34）
+                {0x185dc50, 0x52820019u},   // t2b 扩容：movz w25(cap), #0x1000
             };
             int np = 0;
             for (unsigned k = 0; k < sizeof pats / sizeof pats[0]; k++) {
-                if (pats[k].off + 8 > m->text_end) continue;
-                uint8_t *p = (uint8_t *)m->base + pats[k].off;
-                *(uint32_t *)p = pats[k].w0;
-                if (pats[k].two) *(uint32_t *)(p + 4) = pats[k].w1;
+                if (pats[k].off + 4 > m->text_end) continue;
+                uint32_t *p = (uint32_t *)((uint8_t *)m->base + pats[k].off);
+                *p = pats[k].w0;
                 __builtin___clear_cache((char *)p - 64, (char *)p + 64);   // arm64 I-cache 不连贯
                 np++;
             }
-            LOG("解楔补丁 ×%d：走查器入口桩 + 3 扫描环 NOP", np);
+            LOG("解楔补丁 v2 ×%d：三注册表封顶 4096（判定+满表拒+首扩直升），走查器全真", np);
         }
         uint64_t rx = (m->text_end + PAGE - 1) & ~(uint64_t)(PAGE - 1);
         if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
