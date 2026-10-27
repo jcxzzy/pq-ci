@@ -1298,12 +1298,14 @@ static uint32_t h_openfile(uint64_t *out, const char *path, int mode) {
     if (h >= MAX_FH) { close(fd); return 0xF701; }
     g_fh[h] = fd;
     g_fh_pos[h] = 0;
-    LOG("fs Open %s（mode=%d → h=%d）", path, mode, h);
+    g_fh_bnk[h] = (strstr(path, ".bnk") || strstr(path, ".wem") || strstr(path, "SoundBank")) ? 1 : 0;
+    LOG("fs Open %s（mode=%d → h=%d%s）", path, mode, h, g_fh_bnk[h] ? " ★音频" : "");
     *out = (uint64_t)h;
     return 0;
 }
 static uint32_t g_rdlog_n;
 static uint32_t g_szlog_n;
+static uint8_t g_fh_bnk[64];   // .bnk 句柄标记：Wwise 银行 IO 专查（不受日志封顶影响）
 static uint32_t h_readfile_n(uint64_t *out, uint64_t h, int64_t off, void *buf, uint64_t n) {
     if (!h || h >= MAX_FH || !g_fh[h]) { LOG("ReadFile 无效句柄 h=%llu off=%lld n=%llu", (unsigned long long)h, (long long)off, (unsigned long long)n); return 0xF601; }
     uint64_t pos;
@@ -1313,7 +1315,7 @@ static uint32_t h_readfile_n(uint64_t *out, uint64_t h, int64_t off, void *buf, 
     if (r < 0) { LOG("ReadFile h=%llu off=%lld n=%llu → errno=%d", (unsigned long long)h, (long long)off, (unsigned long long)n, errno); return 0xFA01; }
     g_fh_pos[h] = pos + (uint64_t)r;
     if (out) *out = (uint64_t)r;
-    if (g_rdlog_n < 40) { g_rdlog_n++; LOG("ReadFile h=%llu off=%lld n=%llu → %zd", (unsigned long long)h, (long long)off, (unsigned long long)n, r); }
+    if (g_rdlog_n < 40 || (h < 64 && g_fh_bnk[h])) { g_rdlog_n++; LOG("ReadFile h=%llu off=%lld n=%llu → %zd%s", (unsigned long long)h, (long long)off, (unsigned long long)n, r, (h < 64 && g_fh_bnk[h]) ? " ★" : ""); }
     return 0;
 }
 static uint32_t h_getfilesize(int64_t *out, uint64_t h) {
@@ -1321,13 +1323,14 @@ static uint32_t h_getfilesize(int64_t *out, uint64_t h) {
     struct stat st;
     if (fstat(g_fh[h], &st)) { LOG("GetFileSize h=%llu → fstat 失败", (unsigned long long)h); return 0xE15; }
     *out = st.st_size;
-    if (g_szlog_n++ < 40) LOG("GetFileSize h=%llu → %lld", (unsigned long long)h, (long long)st.st_size);
+    if (g_szlog_n++ < 40 || (h < 64 && g_fh_bnk[h])) LOG("GetFileSize h=%llu → %lld%s", (unsigned long long)h, (long long)st.st_size, (h < 64 && g_fh_bnk[h]) ? " ★" : "");
     return 0;
 }
 static uint32_t h_closefile(uint64_t h) {
     if (h && h < MAX_FH && g_fh[h]) {
-        if (g_szlog_n < 40) LOG("CloseFile h=%llu", (unsigned long long)h);
+        if (g_szlog_n < 40 || (h < 64 && g_fh_bnk[h])) LOG("CloseFile h=%llu%s", (unsigned long long)h, (h < 64 && g_fh_bnk[h]) ? " ★" : "");
         close(g_fh[h]); g_fh[h] = 0;
+        if (h < 64) g_fh_bnk[h] = 0;
     }
     return 0;
 }
