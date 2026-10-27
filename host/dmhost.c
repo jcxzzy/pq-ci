@@ -1312,17 +1312,30 @@ static uint32_t h_openfile(uint64_t *out, const char *path, int mode) {
 }
 static uint32_t g_rdlog_n;
 static uint32_t g_szlog_n;
-static uint32_t h_readfile_n(uint64_t *out, uint64_t h, int64_t off, void *buf, uint64_t n) {
-    if (!h || h >= MAX_FH || !g_fh[h]) { LOG("ReadFile 无效句柄 h=%llu off=%lld n=%llu", (unsigned long long)h, (long long)off, (unsigned long long)n); return 0xF601; }
+static uint32_t readfile_core(uint64_t h, int64_t off, void *buf, uint64_t n, uint64_t *got, int no_out) {
+    *got = 0;
+    if (!h || h >= MAX_FH || !g_fh[h]) { LOG("ReadFile%s 无效句柄 h=%llu off=%lld n=%llu", no_out ? "(no-out)" : "", (unsigned long long)h, (long long)off, (unsigned long long)n); return 0xF601; }
     uint64_t pos;
     if (off < 0) { pos = g_fh_pos[h]; }        // -1 = 从当前位置续读（nnSdk 语义）
     else { pos = (uint64_t)off; g_fh_pos[h] = (uint64_t)off; }
     ssize_t r = pread(g_fh[h], buf, n, (off_t)pos);
     if (r < 0) { LOG("ReadFile h=%llu off=%lld n=%llu → errno=%d", (unsigned long long)h, (long long)off, (unsigned long long)n, errno); return 0xFA01; }
     g_fh_pos[h] = pos + (uint64_t)r;
-    if (out) *out = (uint64_t)r;
-    if (g_rdlog_n < 40 || (h < 64 && g_fh_bnk[h])) { g_rdlog_n++; LOG("ReadFile h=%llu off=%lld n=%llu → %zd%s", (unsigned long long)h, (long long)off, (unsigned long long)n, r, (h < 64 && g_fh_bnk[h]) ? " ★" : ""); }
+    *got = (uint64_t)r;
+    if (g_rdlog_n < 40 || (h < 64 && g_fh_bnk[h])) { g_rdlog_n++; LOG("ReadFile%s h=%llu off=%lld n=%llu → %zd%s", no_out ? "(no-out)" : "", (unsigned long long)h, (long long)off, (unsigned long long)n, r, (h < 64 && g_fh_bnk[h]) ? " ★" : ""); }
     return 0;
+}
+// 变体位序实证：nn::fs::ReadFile 有 out（x0=out）与无 out（x0=h）两族重载，共用一钩会把
+// off 读成句柄（CI 实证：Wwise 调无 out 变体，"零句柄 x1=0、x2=音频缓冲"即此错配）。
+static uint32_t h_readfile_n(uint64_t *out, uint64_t h, int64_t off, void *buf, uint64_t n) {
+    uint64_t got = 0;
+    uint32_t r = readfile_core(h, off, buf, n, &got, 0);
+    if (out) *out = got;
+    return r;
+}
+static uint32_t h_readfile_v3(uint64_t h, int64_t off, void *buf, uint64_t n) {
+    uint64_t got = 0;
+    return readfile_core(h, off, buf, n, &got, 1);
 }
 static uint32_t h_getfilesize(int64_t *out, uint64_t h) {
     if (!h || h >= MAX_FH || !g_fh[h]) { LOG("GetFileSize h=%llu → 句柄无效", (unsigned long long)h); return 0xE15; }
@@ -2941,8 +2954,8 @@ static hle_fn0 force_lookup(const char *name) {
         {"_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", (hle_fn0)h_openfile},
         {"_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", (hle_fn0)h_readfile_n},
         {"_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvmRKNS0_9ReadOptionE", (hle_fn0)h_readfile_n},
-        {"_ZN2nn2fs8ReadFileENS0_10FileHandleElPvm", (hle_fn0)h_readfile_n},
-        {"_ZN2nn2fs8ReadFileENS0_10FileHandleElPvmRKNS0_9ReadOptionE", (hle_fn0)h_readfile_n},
+        {"_ZN2nn2fs8ReadFileENS0_10FileHandleElPvm", (hle_fn0)h_readfile_v3},
+        {"_ZN2nn2fs8ReadFileENS0_10FileHandleElPvmRKNS0_9ReadOptionE", (hle_fn0)h_readfile_v3},
         {"_ZN2nn2fs11GetFileSizeEPlNS0_10FileHandleE", (hle_fn0)h_getfilesize},
         {"_ZN2nn2fs9CloseFileENS0_10FileHandleE", (hle_fn0)h_closefile},
         {"_ZN2nn2fs9FlushFileENS0_10FileHandleE", (hle_fn0)h_flushfile},
