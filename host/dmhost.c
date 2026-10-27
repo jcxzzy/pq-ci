@@ -1303,6 +1303,7 @@ static uint32_t h_openfile(uint64_t *out, const char *path, int mode) {
     return 0;
 }
 static uint32_t g_rdlog_n;
+static uint32_t g_szlog_n;
 static uint32_t h_readfile_n(uint64_t *out, uint64_t h, int64_t off, void *buf, uint64_t n) {
     if (!h || h >= MAX_FH || !g_fh[h]) { LOG("ReadFile 无效句柄 h=%llu off=%lld n=%llu", (unsigned long long)h, (long long)off, (unsigned long long)n); return 0xF601; }
     uint64_t pos;
@@ -1316,14 +1317,18 @@ static uint32_t h_readfile_n(uint64_t *out, uint64_t h, int64_t off, void *buf, 
     return 0;
 }
 static uint32_t h_getfilesize(int64_t *out, uint64_t h) {
-    if (!h || h >= MAX_FH || !g_fh[h]) return 0xF601;
+    if (!h || h >= MAX_FH || !g_fh[h]) { LOG("GetFileSize h=%llu → 句柄无效", (unsigned long long)h); return 0xE15; }
     struct stat st;
-    if (fstat(g_fh[h], &st)) return 0xFA01;
+    if (fstat(g_fh[h], &st)) { LOG("GetFileSize h=%llu → fstat 失败", (unsigned long long)h); return 0xE15; }
     *out = st.st_size;
+    if (g_szlog_n++ < 40) LOG("GetFileSize h=%llu → %lld", (unsigned long long)h, (long long)st.st_size);
     return 0;
 }
 static uint32_t h_closefile(uint64_t h) {
-    if (h && h < MAX_FH && g_fh[h]) { close(g_fh[h]); g_fh[h] = 0; }
+    if (h && h < MAX_FH && g_fh[h]) {
+        if (g_szlog_n < 40) LOG("CloseFile h=%llu", (unsigned long long)h);
+        close(g_fh[h]); g_fh[h] = 0;
+    }
     return 0;
 }
 static uint32_t h_flushfile(uint64_t h) { (void)h; return 0; }
