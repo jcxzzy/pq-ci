@@ -2182,6 +2182,24 @@ static uint32_t n_queue_submit(void *q, int n, void *const *cmds) {
     (void)q;
     static int submit_no;
     submit_no++;
+    {   // 队列对象观测（前 3 次提交）：验证主线程等待的 x19 双检环（LockMutex@x19+0x1e0
+        // 应指池区锁 0x428xxxxx、完成计数@x19+0x214）是否即本队列对象 q——v2.5 实证
+        // 提交全 sync=0：完成信号载体是队列级计数（真机驱动每完成 +1），宿主未推进。
+        static int n_qdump;
+        if (q && n_qdump < 3) {
+            n_qdump++;
+            fprintf(stderr, "[dm] 队列对象 q=%p dump（提交 %d）：\n", q, submit_no);
+            for (int wo = 0; wo < 0x230; wo += 32) {
+                uint64_t a = (uint64_t)(uintptr_t)q + wo;
+                if (!ptr_readable((void *)a)) break;
+                fprintf(stderr, "[dm]   q+%#x: %016llx %016llx %016llx %016llx\n", wo,
+                        (unsigned long long)rd64_checked((void *)a),
+                        (unsigned long long)rd64_checked((void *)(uintptr_t)(a + 8)),
+                        (unsigned long long)rd64_checked((void *)(uintptr_t)(a + 16)),
+                        (unsigned long long)rd64_checked((void *)(uintptr_t)(a + 24)));
+            }
+        }
+    }
     void *syncs[64];
     int nsyncs = 0;
     for (int i = 0; i < n; i++)
