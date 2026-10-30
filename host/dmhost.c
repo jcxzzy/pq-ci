@@ -806,7 +806,9 @@ static uint64_t svc_impl(int num, uint64_t *x) {
                 uint64_t off = 0;
                 for (int i = 0; i < g_nmod; i++)
                     if (site >= (uint64_t)(uintptr_t)g_mod[i].base && site < (uint64_t)(uintptr_t)g_mod[i].base + g_mod[i].size) { mn = g_mod[i].name; off = site - (uint64_t)(uintptr_t)g_mod[i].base; }
-                LOG("svc#28 等待点[%d] %s+%#llx", nseen - 1, mn, (unsigned long long)off);
+                LOG("svc#28 等待点[%d] %s+%#llx x19=%#llx x20=%#llx x21=%#llx（等待者业务对象寄存器）",
+                    nseen - 1, mn, (unsigned long long)off,
+                    (unsigned long long)x[19], (unsigned long long)x[20], (unsigned long long)x[21]);
             }
         }
         // 走查器回调内同步等待检测（v2/v2.1 CI 实证的冻结根因）：装载 worker 睡在
