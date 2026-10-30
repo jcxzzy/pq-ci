@@ -1883,7 +1883,7 @@ static uint32_t n_queue_finalize(void *q) { LOG("nvn QueueFinalize %p", q); *(ui
 // 按 svc#29 协议清键广播。只动池区键——游戏内部同步键误清会造成假唤醒。
 void host_wake_pool_waits(void) {
     static int n_woken;
-    int woken = 0, n_cseq_inc = 0;
+    int woken = 0;
     pthread_mutex_lock(&G);
     for (int i = 0; i < 64; i++) {
         if (!g_keyw[i].n || g_keyw[i].key < 0x400000000ull || g_keyw[i].key >= 0x500000000ull) continue;
@@ -1899,25 +1899,31 @@ void host_wake_pool_waits(void) {
             *(volatile uint32_t *)(uintptr_t)g_keyw[i].key = 0;   // svc#29：清键
             woken++;
         }
-        // 外层业务双检环（v2.3 帧链实证推演）：主线程/h=0x11c 睡 main+0x18fffe4 循环——
-        // LockMutex(x19+0x1e0) 与内层对象互斥体同址 → x19=obj-0x1e0；完成计数 @x19+0x214
-        // =mut+0x18，提交计数 @x19+8=mut-0x1d8。真机由驱动完成线程追平；宿主缺位 →
-        // 等待者醒后查计数未追平即再睡（50ms 心跳唤醒只推进内层）。此处直接追平。
+        // 外层业务双检环观测（v2.4 写入追平被证伪：-0x1d8 处读到 98304=无关数据，写入
+        // 污染有害已回滚）。改为纯观测：dump 键对象 ±0x250 窗口，直接识别 x19+0x214
+        // 完成计数与 x19+8 提交计数的真实布局（前 3 拍各 dump 一次）。
         {
-            volatile uint32_t *cseq = (volatile uint32_t *)(uintptr_t)(g_keyw[i].mut + 0x18);
-            volatile uint32_t *wseq = (volatile uint32_t *)(uintptr_t)(g_keyw[i].mut - 0x1d8);
-            if (ptr_readable((void *)cseq) && ptr_readable((void *)wseq) && *cseq != *wseq) {
-                static int n_cseq;
-                if (n_cseq < 6)
-                    LOG("业务计数追平 @mut=%#llx：完成=%u → 提交=%u", g_keyw[i].mut, *cseq, *wseq);
-                *cseq = *wseq;
-                n_cseq_inc = 1;
+            static int n_dump;
+            if (n_dump < 3) {
+                n_dump++;
+                uint64_t base = g_keyw[i].mut - 0x250;
+                fprintf(stderr, "[dm] 键对象窗口 mut=%#llx（拍 %d）：\n", g_keyw[i].mut, n_dump);
+                for (int wo = 0; wo < 0x4a0; wo += 32) {
+                    uint64_t a = base + wo;
+                    if (!ptr_readable((void *)(uintptr_t)a)) break;
+                    fprintf(stderr, "[dm]   mut%+#x: %016llx %016llx %016llx %016llx\n",
+                            wo - 0x250,
+                            (unsigned long long)rd64_checked((void *)(uintptr_t)a),
+                            (unsigned long long)rd64_checked((void *)(uintptr_t)(a + 8)),
+                            (unsigned long long)rd64_checked((void *)(uintptr_t)(a + 16)),
+                            (unsigned long long)rd64_checked((void *)(uintptr_t)(a + 24)));
+                }
             }
         }
     }
     if (woken) pthread_cond_broadcast(&GV);
     pthread_mutex_unlock(&G);
-    if (woken && n_woken++ < 8) LOG("驱动侧完成唤醒：%d 个池区等待键（序号+1）%s", woken, n_cseq_inc ? "＋业务计数追平" : "");
+    if (woken && n_woken++ < 8) LOG("驱动侧完成唤醒：%d 个池区等待键（序号+1）", woken);
 }
 static uint32_t n_queue_geterror(void *q, void *info) { (void)q; if (info) memset(info, 0, 0x18); return 0; }
 // —— Metal 回放层（nvn_mtl.m）：真提交 + 完成回流（第一阶段骨架） ——
@@ -2189,6 +2195,12 @@ static uint32_t n_queue_submit(void *q, int n, void *const *cmds) {
         }
     }
     mtl_submit_chains(cmds, n, dup, dup ? nsyncs : 0);   // dup 由 mtl 层完成后释放
+    {   // 提交计数观测（冻结期判定：NVN 提交是否还在发生——v2.x 冻结根因定位用）
+        static uint32_t n_submit;
+        n_submit++;
+        if ((n_submit & 0xf) == 1 || n_submit > 0x1000)
+            LOG("NVN 提交 #%u（链 %d sync %d%s）", n_submit, n, nsyncs, (n_submit & 0xf) == 1 ? "" : " …");
+    }
     return 0;
 }
 // —— 贴图/采样器/缓冲描述符池（对象：magic@0 pool@8 off@16 count@24）
