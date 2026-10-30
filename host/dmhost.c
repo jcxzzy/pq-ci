@@ -795,6 +795,27 @@ static uint64_t svc_impl(int num, uint64_t *x) {
                 LOG("svc#28 等待点[%d] %s+%#llx", nseen - 1, mn, (unsigned long long)off);
             }
         }
+        // 走查器回调内同步等待检测（v2/v2.1 CI 实证的冻结根因）：装载 worker 睡在
+        // walker 节点回调的 svc#28 里 = 自等死锁（worker 帧链 0x1866fd8←0x1866570，
+        // 真机上回调等的是驱动/硬件完成信号，宿主无人生成）。v1 桩时代回调不执行故无
+        // 此锁。检测：帧链 8 跳内返回地址落入 walker 区间（main+0x185d6c8..0x185d758）。
+        // 命中 → 返超时 0xEA01 让回调放弃等待继续（锁值/键字均不动：等待者从未入睡，
+        // 回调后续 Unlock/Signal 语义保持一致）。
+        {
+            uint64_t wb = (uint64_t)(uintptr_t)g_mod[0].base;
+            uint64_t fp = x[29], a = x[30], hits = 0;
+            for (int hop = 0; hop < 8 && fp; hop++) {
+                if (a >= wb + 0x185d6c8 && a < wb + 0x185d758) { hits = 1; break; }
+                if (!ptr_readable((void *)(uintptr_t)fp)) break;
+                a = rd64_checked((void *)(uintptr_t)(fp + 8));
+                fp = rd64_checked((void *)(uintptr_t)fp);
+            }
+            if (hits) {
+                LOG("★ walker 回调内等待（键=%#llx 互斥=%#llx tag=%u）→ 返 0xEA01 解锁",
+                    (unsigned long long)x[1], (unsigned long long)x[0], (unsigned)x[2]);
+                return 0xEA01;
+            }
+        }
         volatile uint32_t *km = (volatile uint32_t *)(uintptr_t)x[1];
         uint32_t tag = (uint32_t)x[2];
         int ki = -1;
