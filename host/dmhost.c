@@ -194,6 +194,7 @@ typedef struct thr {
     struct thr *all;
     int hist[8];   // 最近 8 个 svc 号（环形）——看门狗时据此看各线程卡在哪类等待
     uint64_t last_lr, last_x0, last_x1;   // 最后一次 svc 的调用点与参数（等待者身份取证）
+    uint64_t wait_lock;                   // svc#26 正在等的锁地址（0=未在等；锁链探针）
 } thr_t;
 typedef struct { int signaled; } ev_t;
 enum { H_NONE = 0, H_THREAD, H_EVENT, H_FAKE };
@@ -381,6 +382,14 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
                         (unsigned long long)t->last_x1,
                         (unsigned)*(volatile uint32_t *)(uintptr_t)t->last_x1,
                         t->last_x0 ? (unsigned)*(volatile uint32_t *)(uintptr_t)t->last_x0 : 0u);
+        // 锁链探针（svc#26 等待者 → 持有者）：钉死"谁持锁睡了"的完整死锁环
+        for (thr_t *t = g_thr_all; t; t = t->all) {
+            if (t->exited || !t->wait_lock || !ptr_readable((void *)(uintptr_t)t->wait_lock)) continue;
+            uint32_t lv = *(volatile uint32_t *)(uintptr_t)t->wait_lock;
+            uint32_t owner = lv & ~0x40000000u;
+            fprintf(stderr, "[dm]   h=%#x 等锁 %#llx：锁字=%#x → 持有者 h=%#x\n",
+                    t->handle, (unsigned long long)t->wait_lock, lv, owner);
+        }
     }
     // 主循环分发链转储（自旋楔死取证）：头 = *(*(main+0x2d20210))，节点 {next@0, type@8,
     // 字段@0x10/0x18, 回调@0x38, 参@0x40}——循环体 0x185d6e4 按类型调 0x185d74c / 0x185d980
@@ -750,16 +759,21 @@ static uint64_t svc_impl(int num, uint64_t *x) {
         // 自死锁（CI 实证：主线程等 h=0x106 的锁，0x106 自己卡在 26 上等同一把锁）。
         volatile uint32_t *m = (volatile uint32_t *)(uintptr_t)x[1];
         uint32_t owner = (uint32_t)x[0], tag = (uint32_t)x[2];
+        if (t_cur) t_cur->wait_lock = (uint64_t)(uintptr_t)m;   // 锁链探针：等待者→持有者
         pthread_mutex_lock(&G);
         for (;;) {
             uint32_t v = *m;
             uint32_t own = v & ~0x40000000u;
             if (!own) {   // 无主（0 或仅残留等待位）：直接课有——曾按「预期不符即返回」把
                 // ReleaseSemaphore 内部取锁静默丢掉（SDK 不查返回值），信号量投递丢失
+                if (t_cur) t_cur->wait_lock = 0;
                 if (__sync_bool_compare_and_swap(m, v, tag)) break;
                 continue;
             }
-            if (own != owner) break;   // 真被他者持有且与预期不符：按 HOS 返回，用户态重查
+            if (own != owner) {   // 真被他者持有且与预期不符：按 HOS 返回，用户态重查
+                if (t_cur) t_cur->wait_lock = 0;
+                break;
+            }
             if (!(v & 0x40000000u)) __sync_fetch_and_or(m, 0x40000000u);   // 预期持有者仍持有：标等待位
             struct timespec ts = {0, 500000};   // 0.5ms 防御轮询
             pthread_mutex_unlock(&G);
