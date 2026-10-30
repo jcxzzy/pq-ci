@@ -468,20 +468,30 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
                 }
             }
             // 三注册表 v2 封顶行为观测：t1 订阅 24B、t2a 24B、t2b 池 16B（cap 应恒 ≤0x1000）
+            // 对象 = *global（单跳）；旧版误做双跳把 array 字段当对象 → count 读越界垃圾。
             static const struct { uint64_t g; const char *nm; } k_regs[] = {
                 {0x2b34170, "t1订阅"}, {0x2b34168, "t2a"}, {0x2b34178, "t2b池"},
             };
             for (unsigned r = 0; r < 3; r++) {
-                uint64_t rp = rd64_checked((void *)(uintptr_t)(gb + k_regs[r].g));
-                uint64_t reg = rp ? rd64_checked((void *)(uintptr_t)rp) : 0;
-                if (reg && ptr_readable((void *)(uintptr_t)reg))
-                    fprintf(stderr, "[dm] 注册表[%s] arr=%#llx count=%llu cap=%llu\n", k_regs[r].nm,
-                            (unsigned long long)rd64_checked((void *)(uintptr_t)reg),
-                            (unsigned long long)(rd64_checked((void *)(uintptr_t)(reg + 8)) & 0xffffffff),
-                            (unsigned long long)(rd64_checked((void *)(uintptr_t)(reg + 0xc)) & 0xffffffff));
+                uint64_t obj = rd64_checked((void *)(uintptr_t)(gb + k_regs[r].g));
+                if (obj && ptr_readable((void *)(uintptr_t)obj))
+                    fprintf(stderr, "[dm] 注册表[%s] obj=%#llx arr=%#llx count=%llu cap=%llu\n", k_regs[r].nm,
+                            (unsigned long long)obj,
+                            (unsigned long long)rd64_checked((void *)(uintptr_t)obj),
+                            (unsigned long long)(rd64_checked((void *)(uintptr_t)(obj + 8)) & 0xffffffff),
+                            (unsigned long long)(rd64_checked((void *)(uintptr_t)(obj + 0xc)) & 0xffffffff));
                 else
-                    fprintf(stderr, "[dm] 注册表[%s] 未建立（*%#llx=%#llx → %#llx）\n", k_regs[r].nm,
-                            (unsigned long long)k_regs[r].g, (unsigned long long)rp, (unsigned long long)reg);
+                    fprintf(stderr, "[dm] 注册表[%s] 未建立（*%#llx=%#llx）\n", k_regs[r].nm,
+                            (unsigned long long)k_regs[r].g, (unsigned long long)obj);
+            }
+            // B 链微秒连采：瞬时非空窗口检测（快照恒空 vs 走查线程 pc 在 t2 内 的矛盾裁决）
+            {
+                int burst_nonzero = 0;
+                for (int q = 0; q < 300; q++) {
+                    if (hb && *(volatile uint64_t *)(uintptr_t)hb) { burst_nonzero++; break; }
+                    usleep(100);
+                }
+                fprintf(stderr, "[dm] B链微秒连采 300×100µs：%s\n", burst_nonzero ? "出现非空头（生产活跃）" : "恒空（无生产）");
             }
         }
     }
@@ -516,6 +526,13 @@ void dm_dump_threads(void) {   // fault.c 看门狗到期时调用：各客体�
             if (older_live) continue;   // 有更老的存活线程：让位（新线程等下一轮心跳）
         }
         pthread_kill(t->pt, SIGUSR1); usleep(20000); sampled++;
+    }
+    // 密集复采：同一批线程连发 4 轮 ×6ms——pc 序列恒定=卡单指令；跳动=高频进出（热点）
+    for (int round = 0; round < 4; round++) {
+        for (thr_t *t = g_thr_all; t; t = t->all) {
+            if (t->exited || t->parked || t == g_thr_main) continue;
+            pthread_kill(t->pt, SIGUSR1); usleep(6000);
+        }
     }
 }
 // 出参契约按各包装函数 svc 后指令实证（全量扫描 106 个门）：小标量一律从寄存器回——
@@ -3216,8 +3233,13 @@ static void load_modules(const char *dir, const char **names, int n) {    for (i
                 {0x185db24, 0x540012a2u},   // t2a 满表：b.hs 0x185dd78（拒插返 0x34）
                 {0x185db34, 0x52820018u},   // t2a 扩容：movz w24(cap), #0x1000
                 {0x185dc40, 0x713fff1fu},   // t2b 判定：cmp w24(count), #0xfff
-                {0x185dc44, 0x540009e2u},   // t2b 满表：b.hs 0x185dd80（拒插返 0x34）
+                {0x185dc44, 0x540009e2u},   // t2b 满表：b.hs 0x185dd80（拒插）
                 {0x185dc50, 0x52820019u},   // t2b 扩容：movz w25(cap), #0x1000
+                // t2b miss 返 1（宿主池债）：真机上驱动侧把 NVN 池键注册进 t2b，宿主直接
+                // 管 Metal 池没走客体注册 → 恒 miss → 依赖池查找的完成回调永不触发 →
+                // 全局装载协议冻结（v2 CI 两轮实证）。miss 拒插路径改 x8=1 → csel 取
+                // w9=1：查找恒"成功"，回调触发链恢复（= v1 桩的推进力 + v2 真实语义）。
+                {0x185dd78, 0xd2800028u},   // movz x8,#1（原 mov x8,xzr）
             };
             int np = 0;
             for (unsigned k = 0; k < sizeof pats / sizeof pats[0]; k++) {
