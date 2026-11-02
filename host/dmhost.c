@@ -159,6 +159,7 @@ static uint8_t *g_as;                 // 客体地址空间基址（= ASLR 区�
 static uint8_t *g_alias, *g_stack, *g_heap;
 static size_t g_heap_cur;             // SetHeapSize 已提交大小
 uint64_t g_guest_lo, g_guest_hi;      // 预留块区间（fault.c 转储客体对象用）
+uint64_t g_main_base, g_main_size;    // 主模块区间（fault.c 双检环帧取证用）
 static void mem_init(void) {
     if (g_as) return;
     g_as = mmap(NULL, RESERVE, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -3344,6 +3345,7 @@ static void load_modules(const char *dir, const char **names, int n) {    for (i
         g_mod_ref[g_nmod_ref].base = m->base;
         g_mod_ref[g_nmod_ref].size = m->size;
         g_nmod_ref++;
+        if (!i) { g_main_base = (uint64_t)(uintptr_t)m->base; g_main_size = m->size; }   // fault.c 双检环帧取证
         g_nmod++;
     }
     for (int i = 0; i < g_nmod; i++) relocate(&g_mod[i]);
