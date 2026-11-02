@@ -16,6 +16,7 @@ extern mod_ref_t g_mod_ref[8];
 extern int g_nmod_ref;
 extern int g_last_svc;
 extern uint64_t g_guest_lo, g_guest_hi;   // dmhost 预留块区间（客体堆在内）
+extern uint64_t g_main_base, g_main_size; // dmhost 主模块区间（双检环帧取证用）
 // 宿主移交登记（dmhost.c handout_reg）：崩溃寄存器里的宿主指针据此归属
 typedef struct { const char *name; const void *lo, *hi; } handout_t;
 extern handout_t g_handout[12];
@@ -42,6 +43,16 @@ void guest_backtrace(uint64_t fp) {
         char w2[64] = "";
         where_of(ret, w2, sizeof w2);
         fprintf(stderr, "[dm]   帧%d fp=%#llx lr=%#llx(%s)\n", i, (unsigned long long)f, (unsigned long long)ret, w2);
+        // 双检环帧取证：返回地址落 main+0x18ffe00..0x1900100（锁轮询等待循环族）时
+        // dump 帧头 0x30 字节——callee-saved x19/x20（业务对象：+0x1e0 锁、+0x214 完成计数）
+        // 保存在帧头 stp 区。v2.x 冻结根因（宿主未推进队列级完成计数）的最后定位。
+        if (i >= 3 && ret >= g_main_base && ret < g_main_base + g_main_size &&
+            ret - g_main_base >= 0x18ffe00ull && ret - g_main_base < 0x1900100ull) {
+            fprintf(stderr, "[dm]   ↶ 双检环帧栈 dump：");
+            for (int o = 0; o < 0x30; o += 8)
+                fprintf(stderr, " [%#x]=%#llx", o, (unsigned long long)*(uint64_t *)(f + o));
+            fputc('\n', stderr);
+        }
         if (nxt <= f) break;
         f = nxt;
     }
